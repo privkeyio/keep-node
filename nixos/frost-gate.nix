@@ -144,20 +144,37 @@ in
           # Open via the TPM2 token (now the only slot) and lay down the filesystem.
           ${systemdCryptsetup} attach "$mapper" "$dev" - tpm2-device=auto
           mkfs.ext4 -F /dev/mapper/"$mapper"
+          # Completion marker: stamp the LUKS2 subsystem field now that a filesystem exists. The
+          # recovery branch reads it to distinguish "interrupted first provision, no data, safe to
+          # wipe" from "fully provisioned, may hold data, must fail closed" if the TPM2 token is
+          # ever lost. It lives in our own header (cleared by wipefs on re-provision), carries no
+          # secret, and is the last step so its presence implies mkfs completed. Re-set --label in
+          # the same call: `cryptsetup config --subsystem` alone clears the existing label, which
+          # would break the wrong-device guard and recovery detection on the next boot.
+          cryptsetup config "$dev" --label "$label" --subsystem keep-node-provisioned
           trap - ERR
         }
 
         if [ "$luks_type" = crypto_LUKS ] && [ "$luks_label" = "$label" ]; then
-          # Capture the enrollment listing first: piping straight into `grep -q` can SIGPIPE
-          # the producer and, under pipefail, misreport a healthy volume as un-enrolled.
+          # Capture the listings first: piping straight into `grep -q` can SIGPIPE the producer
+          # and, under pipefail, misreport a healthy volume as un-enrolled / un-marked.
           enrolled="$(systemd-cryptenroll "$dev")"
+          dump="$(cryptsetup luksDump "$dev")"
           if grep -q tpm2 <<<"$enrolled"; then
             # Provisioned: unlock via the TPM2 token (no passphrase, PCR 7). Fails closed if
             # the TPM refuses (e.g. PCR change); vaultwarden then stays down, by design.
             [ -e /dev/mapper/"$mapper" ] || ${systemdCryptsetup} attach "$mapper" "$dev" - tpm2-device=auto
+          elif grep -q keep-node-provisioned <<<"$dump"; then
+            # Our label, no TPM2 token, but the completion marker is set: provisioning finished, so
+            # this volume may hold real data, and its only keyslot is gone (a PCR change, TPM clear,
+            # or a removed token). The data is unrecoverable on-box; per the fail-closed design
+            # (header: recover from a replica, never keep a local secret) we MUST NOT reformat it.
+            # Stay down so an operator re-provisions from a replica instead of silently wiping data.
+            echo "frost-gate: $dev was provisioned but its TPM2 token is gone; refusing to reformat. Recover from a replica." >&2
+            exit 1
           else
-            # Our label but no TPM2 token: a first-boot provision interrupted before/at
-            # enrollment (e.g. power loss). Reclaim our own volume and redo it.
+            # Our label, no TPM2 token, no completion marker: a first-boot provision interrupted
+            # before mkfs (e.g. power loss). No filesystem was ever written; reclaim and redo it.
             wipefs -a "$dev"
             provision
           fi
