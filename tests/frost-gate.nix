@@ -52,5 +52,23 @@
     node.succeed("grep -qx keep-node-canary /var/lib/vaultwarden/canary")
     node.wait_for_open_port(8222)
     node.succeed("curl -fsS http://localhost:8222/alive")
+
+    # Anti-brick: if the TPM token is lost (a PCR change, TPM clear, or an enroll interrupted
+    # by power loss all leave our LUKS volume with no usable TPM2 token), the gate must
+    # reclaim and re-provision its OWN volume on the next boot rather than getting stuck.
+    # Simulate token loss, then reboot and assert the node recovers to a working state.
+    tokid = node.succeed("cryptsetup luksDump /dev/vdb | sed -n 's/^\\s*\\([0-9]\\+\\): systemd-tpm2/\\1/p' | head -n1").strip()
+    node.succeed(f"cryptsetup token remove --token-id {tokid} /dev/vdb")
+    node.succeed("systemd-cryptenroll /dev/vdb | grep -vq tpm2")  # token really gone
+
+    node.shutdown()
+    node.start()
+    node.wait_for_unit("keep-node-frost-gate.service")
+    node.succeed("test -e /dev/mapper/keep-vault")  # reclaimed + re-provisioned, not bricked
+    node.wait_for_unit("vaultwarden.service")
+    node.wait_for_open_port(8222)
+    node.succeed("curl -fsS http://localhost:8222/alive")
+    # The canary is gone here, by design: an unrecoverable volume is re-provisioned, not unlocked.
+    node.fail("test -e /var/lib/vaultwarden/canary")
   '';
 }
