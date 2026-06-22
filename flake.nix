@@ -50,22 +50,22 @@
         default = keep-web;
       };
 
-      # The MVP test suite. The tests boot real NixOS VMs (no hardware needed) and are the
+      # The test suite. The tests boot real NixOS VMs (no hardware needed) and are the
       # appliance's verification. Pattern follows nix-community/lanzaboote's nix/tests.
-      #   nix flake check                                   # run all (incl. formatting)
-      #   nix build .#checks.x86_64-linux.m0                # just M0
-      #   nix build .#checks.x86_64-linux.m0.driverInteractive
-      #     ./result/bin/nixos-test-driver --interactive    # boot + poke the VM
+      #   nix flake check                                         # run all (incl. formatting)
+      #   nix build .#checks.x86_64-linux.single-node             # one test
+      #   nix build .#checks.x86_64-linux.single-node.driverInteractive
+      #     ./result/bin/nixos-test-driver --interactive          # boot + poke the VM
       checks.${system} = {
-        m0 = pkgs.testers.runNixOSTest {
-          imports = [ ./tests/m0-single-node.nix ];
+        single-node = pkgs.testers.runNixOSTest {
+          imports = [ ./tests/single-node.nix ];
           _module.args.keepWebPackage = keep-web;
         };
-        m0-frost-gate = pkgs.testers.runNixOSTest {
-          imports = [ ./tests/m0-frost-gate.nix ];
+        frost-gate = pkgs.testers.runNixOSTest {
+          imports = [ ./tests/frost-gate.nix ];
         };
         formatting = treefmtEval.config.build.check self;
-        # m1 = pkgs.testers.runNixOSTest { imports = [ ./tests/m1-ha-failover.nix ]; };  # stub
+        # ha-failover = pkgs.testers.runNixOSTest { imports = [ ./tests/ha-failover.nix ]; };  # stub
       };
 
       devShells.${system}.default = pkgs.mkShell {

@@ -1,10 +1,10 @@
-# M0 frost-gate v1: Vaultwarden's data dir is a TPM-sealed LUKS volume, auto-unlocked at boot.
+# frost-gate v1: Vaultwarden's data dir is a TPM-sealed LUKS volume, auto-unlocked at boot.
 # Grounded in nixpkgs nixos/tests/systemd-cryptenroll.nix (emptyDiskImages + tpm.enable +
 # systemd-cryptenroll --tpm2-device=auto), unlocked by the keep-node-frost-gate service.
-# Run: nix build .#checks.x86_64-linux.m0-frost-gate
+# Run: nix build .#checks.x86_64-linux.frost-gate
 { ... }:
 {
-  name = "keep-node-m0-frost-gate";
+  name = "keep-node-frost-gate-test";
 
   nodes.node =
     { pkgs, ... }:

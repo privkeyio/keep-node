@@ -1,4 +1,4 @@
-# M1 (STUB): two KeepNodes sync; kill one, the other keeps serving.
+# STUB: two KeepNodes sync; kill one, the other keeps serving (multi-node HA).
 #
 # Fill in once the sync layer lands:
 #   * transport: nvpn mesh between nodeA and nodeB (see SPIKE-nostr-vpn.md)
@@ -11,10 +11,10 @@
 #   both nodes reach vaultwarden + join the mesh
 #   write a vault item via nodeA
 #   nodeA.crash()
-#   nodeB still serves the item  <-- the M1 proof
+#   nodeB still serves the item  <-- the proof
 { ... }:
 {
-  name = "keep-node-m1-ha-failover";
+  name = "keep-node-ha-failover";
 
   nodes.nodeA =
     { ... }:
@@ -31,6 +31,6 @@
     start_all()
     nodeA.wait_for_unit("vaultwarden.service")
     nodeB.wait_for_unit("vaultwarden.service")
-    # TODO(M1): mesh join, replication, then nodeA.crash() and assert nodeB still serves.
+    # TODO: mesh join, replication, then nodeA.crash() and assert nodeB still serves.
   '';
 }

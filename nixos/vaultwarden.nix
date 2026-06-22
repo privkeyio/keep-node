@@ -9,7 +9,8 @@
 #   * That volume's key is released only when the FROST quorum approves (frost-gate.nix).
 #   * vaultwarden.service is ordered After= the gate, so it starts only once unlocked.
 #
-# For the M0 VM there is no LUKS/hardware; state is on plain disk so the node boots and serves.
+# When the frost-gate is disabled there is no LUKS volume; state is on plain disk so the node
+# still boots and serves (used by the single-node test).
 { config, lib, ... }:
 let
   cfg = config.keepNode.vaultwarden;
@@ -45,7 +46,7 @@ in
     };
 
     # No firewall port opened: nothing reaches Vaultwarden except via localhost / the mesh.
-    # M1 hook: the vaultwarden state dir (managed by the NixOS module) is the bind/mount
-    # target for the FROST-gated LUKS volume. frost-gate.nix orders the unlock before this.
+    # The vaultwarden state dir is where the frost-gate mounts the FROST-gated LUKS volume,
+    # and vaultwarden.service is ordered after the gate (see frost-gate.nix).
   };
 }

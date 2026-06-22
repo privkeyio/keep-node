@@ -12,7 +12,7 @@ keep-node turns a small Linux box into a private security appliance. Each node r
 
 Part of the [Keep](https://github.com/privkeyio/keep) ecosystem; the node daemon, vault, and threshold signing are reused from [`keep`](https://github.com/privkeyio/keep) (`keep-web`, `keep-core`).
 
-> **Status: early MVP scaffold.** Today it boots Vaultwarden and the keep-web daemon in a NixOS VM (M0). Threshold volume-gating, multi-node sync, and hardware support are in progress.
+> **Status: early scaffold.** Today it boots Vaultwarden and the keep-web daemon in a NixOS VM, with Vaultwarden's data on a TPM-sealed LUKS volume that auto-unlocks at boot. Making that unlock a FROST quorum (instead of TPM-only), multi-node sync, and hardware support are in progress.
 
 ## Features
 
@@ -29,8 +29,8 @@ Requires [Nix](https://nixos.org/download) with flakes enabled.
 # Run the test suite (boots a VM, no hardware needed: Vaultwarden + keep-web)
 nix flake check
 
-# Boot the M0 VM interactively to poke at it
-nix build .#checks.x86_64-linux.m0.driverInteractive
+# Boot the VM interactively to poke at it
+nix build .#checks.x86_64-linux.single-node.driverInteractive
 ./result/bin/nixos-test-driver --interactive
 ```
 
