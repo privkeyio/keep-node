@@ -40,7 +40,7 @@ in
       type = lib.types.nullOr lib.types.path;
       default = null;
       description = ''
-        File holding the vault unlock password (KEEP_PASSWORD_FILE). For M0 this is a dev
+        File holding the vault unlock password (KEEP_PASSWORD_FILE). For now this is a dev
         secret; in production the unlock is driven by the FROST quorum (keepNode.frostGate),
         not a static file.
       '';

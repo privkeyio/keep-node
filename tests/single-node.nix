@@ -1,8 +1,8 @@
-# M0: a single KeepNode boots and serves both Vaultwarden and keep-web.
-# Run: nix flake check   (or: nix build .#checks.x86_64-linux.m0)
+# A single KeepNode boots and serves both Vaultwarden and keep-web.
+# Run: nix flake check   (or: nix build .#checks.x86_64-linux.single-node)
 { keepWebPackage, ... }:
 {
-  name = "keep-node-m0-single-node";
+  name = "keep-node-single-node";
 
   nodes.node =
     { ... }:
@@ -15,7 +15,7 @@
         passwordFile = "/etc/keep-node/dev-password";
       };
       # Dev-only unlock secret for the VM test. Production unlock is FROST-driven.
-      environment.etc."keep-node/dev-password".text = "dev-password-m0-only";
+      environment.etc."keep-node/dev-password".text = "dev-password-vm-only";
     };
 
   testScript = ''
@@ -31,6 +31,6 @@
     node.wait_for_open_port(8080)
     node.succeed("curl -fsS http://localhost:8080/api/health")
 
-    # M0 done = both core services are up on a freshly booted node.
+    # Done = both core services are up on a freshly booted node.
   '';
 }
