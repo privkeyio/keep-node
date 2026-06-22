@@ -12,7 +12,12 @@
 #
 # For the M0 VM there is no hardware/LUKS; this unit is a no-op placeholder so the wiring and
 # ordering exist before the real unseal logic lands (M1/M2).
-{ config, lib, pkgs, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 let
   cfg = config.keepNode.frostGate;
 in

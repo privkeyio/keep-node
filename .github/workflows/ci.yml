@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      # The M0 nixosTest boots a QEMU VM; KVM makes it fast (and avoids timeouts).
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      # Cache /nix/store so keep-web (built from privkeyio/keep) isn't recompiled every run.
+      - name: Nix store cache
+        uses: nix-community/cache-nix-action@v6
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock', '**/*.nix') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+
+      # Builds packages (keep-web) and runs checks (the M0 VM test: Vaultwarden + keep-web).
+      - name: Flake check
+        run: nix flake check -L

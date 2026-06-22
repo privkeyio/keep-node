@@ -11,7 +11,7 @@ result-*
 .DS_Store
 *.swp
 
-# Beads / Dolt (local planning only, never committed)
+# Beads / Dolt (local only, never committed)
 .beads/
 .dolt/
 *.db

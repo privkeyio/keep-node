@@ -26,11 +26,12 @@ Part of the [Keep](https://github.com/privkeyio/keep) ecosystem; the node daemon
 Requires [Nix](https://nixos.org/download) with flakes enabled.
 
 ```bash
-# Boot the appliance in a local VM (Vaultwarden on http://localhost:8222)
-nix run github:privkeyio/keep-node#keep-node-vm
-
-# Run the test suite
+# Run the test suite (boots a VM, no hardware needed: Vaultwarden + keep-web)
 nix flake check
+
+# Boot the M0 VM interactively to poke at it
+nix build .#checks.x86_64-linux.m0.driverInteractive
+./result/bin/nixos-test-driver --interactive
 ```
 
 ## License

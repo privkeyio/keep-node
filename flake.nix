@@ -3,30 +3,66 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    # keep.url = "github:privkeyio/keep";   # TODO(M0): expose keep-web as a package, wire here
+    # keep-web (headless daemon, FROST co-signer, NIP-46 bunker) is built from privkeyio/keep.
+    # keep has no flake, so consume the source and build it here.
+    keep = {
+      url = "github:privkeyio/keep";
+      flake = false;
+    };
+    treefmt-nix = {
+      url = "github:numtide/treefmt-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
-    { self, nixpkgs }:
+    {
+      self,
+      nixpkgs,
+      keep,
+      treefmt-nix,
+    }:
     let
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
-    in
-    {
-      # The appliance as a bootable VM for M0 development (no hardware required).
-      #   nix run .#keep-node-vm        # boots a QEMU VM running Vaultwarden
-      nixosConfigurations.keep-node-vm = nixpkgs.lib.nixosSystem {
-        inherit system;
-        modules = [
-          ./nixos/keep-node.nix
-          ./nixos/vm.nix
-        ];
+
+      treefmtEval = treefmt-nix.lib.evalModule pkgs {
+        projectRootFile = "flake.nix";
+        programs.nixfmt.enable = true;
       };
 
-      # Run the MVP test suite:  nix flake check
+      keep-web = pkgs.rustPlatform.buildRustPackage {
+        pname = "keep-web";
+        version = "0.4.9";
+        src = keep;
+        cargoLock.lockFile = "${keep}/Cargo.lock";
+        # Build only the keep-web crate from the workspace.
+        buildAndTestSubdir = "keep-web";
+        nativeBuildInputs = [ pkgs.pkg-config ];
+        buildInputs = [ pkgs.openssl ];
+        doCheck = false; # workspace tests, not needed to ship the binary
+        meta.mainProgram = "keep-web";
+      };
+    in
+    {
+      packages.${system} = {
+        inherit keep-web;
+        default = keep-web;
+      };
+
+      # The MVP test suite. The tests boot real NixOS VMs (no hardware needed) and are the
+      # appliance's verification. Pattern follows nix-community/lanzaboote's nix/tests.
+      #   nix flake check                                   # run all (incl. formatting)
+      #   nix build .#checks.x86_64-linux.m0                # just M0
+      #   nix build .#checks.x86_64-linux.m0.driverInteractive
+      #     ./result/bin/nixos-test-driver --interactive    # boot + poke the VM
       checks.${system} = {
-        m0 = pkgs.testers.runNixOSTest ./tests/m0-single-node.nix;
-        # m1 = pkgs.testers.runNixOSTest ./tests/m1-ha-failover.nix;  # stub, see file
+        m0 = pkgs.testers.runNixOSTest {
+          imports = [ ./tests/m0-single-node.nix ];
+          _module.args.keepWebPackage = keep-web;
+        };
+        formatting = treefmtEval.config.build.check self;
+        # m1 = pkgs.testers.runNixOSTest { imports = [ ./tests/m1-ha-failover.nix ]; };  # stub
       };
 
       devShells.${system}.default = pkgs.mkShell {
@@ -36,6 +72,7 @@
         ];
       };
 
-      formatter.${system} = pkgs.nixfmt-rfc-style;
+      # `nix fmt` formats the tree; `checks.formatting` enforces it in CI.
+      formatter.${system} = treefmtEval.config.build.wrapper;
     };
 }
