@@ -28,7 +28,8 @@ jobs:
           sudo udevadm trigger --name-match=kvm
 
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
+        # Pinned to a full commit SHA (v22) so CI never runs a mutable upstream ref.
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25
 
       # Cache /nix/store so keep-web (built from privkeyio/keep) isn't recompiled every run.
       - name: Nix store cache

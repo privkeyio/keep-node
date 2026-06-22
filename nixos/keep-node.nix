@@ -2,8 +2,9 @@
 #
 # Pulls together the security services (Vaultwarden), the Keep daemon (keep-web), and the
 # FROST threshold volume gate. For M0 only Vaultwarden is enabled by default so the node
-# boots end-to-end in a VM with no hardware; keep-web and the frost-gate are opt-in stubs
-# wired in as the build progresses (M0 -> M1 -> M2).
+# boots end-to-end in a VM with no hardware. keep-web is a real built package (see flake.nix),
+# off by default here but enabled by the M0 test; the frost-gate is still an opt-in stub. These
+# get wired into the default composition as the build progresses (M0 -> M1 -> M2).
 #
 # See the design docs (kept outside this repo): KEEP-NODE.md, BUILD-PLAN.md,
 # SPIKE-vaultwarden-unlock.md (Approach B).

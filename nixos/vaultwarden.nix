@@ -24,8 +24,8 @@ in
     };
     signupsAllowed = lib.mkOption {
       type = lib.types.bool;
-      default = true; # MVP/dev only; lock down before any real deployment.
-      description = "Allow self-registration. Dev default; disable for production.";
+      default = false; # default-deny; first user via admin/invite, never open self-registration
+      description = "Allow self-registration. Off by default; the node is not an open signup endpoint.";
     };
   };
 
@@ -34,14 +34,18 @@ in
       enable = true;
       dbBackend = "sqlite"; # default datastore; matches the active/standby replication plan
       config = {
-        ROCKET_ADDRESS = "0.0.0.0";
+        # Bind localhost only. The vault is never exposed as plaintext HTTP on the LAN;
+        # access is over the encrypted transport (nvpn/WireGuard mesh, Tor, start-tunnel),
+        # which terminates to localhost. TLS is handled at that ingress layer (and Bitwarden
+        # clients require HTTPS anyway, so a raw LAN HTTP bind is not even usable by them).
+        ROCKET_ADDRESS = "127.0.0.1";
         ROCKET_PORT = cfg.port;
         SIGNUPS_ALLOWED = cfg.signupsAllowed;
       };
     };
 
+    # No firewall port opened: nothing reaches Vaultwarden except via localhost / the mesh.
     # M1 hook: the vaultwarden state dir (managed by the NixOS module) is the bind/mount
     # target for the FROST-gated LUKS volume. frost-gate.nix orders the unlock before this.
-    networking.firewall.allowedTCPPorts = [ cfg.port ];
   };
 }

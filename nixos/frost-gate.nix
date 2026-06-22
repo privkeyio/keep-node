@@ -55,12 +55,19 @@ in
         assertion = cfg.quorum.threshold <= cfg.quorum.total && cfg.quorum.threshold >= 1;
         message = "keepNode.frostGate.quorum: need 1 <= threshold <= total.";
       }
+      {
+        assertion = cfg.volumeDevice != null;
+        message = "keepNode.frostGate.enable requires keepNode.frostGate.volumeDevice (the LUKS volume to unseal).";
+      }
     ];
 
     systemd.services.keep-node-frost-gate = {
       description = "KeepNode FROST volume gate (stub)";
       wantedBy = [ "multi-user.target" ];
       before = [ "vaultwarden.service" ];
+      # Hard dependency, not just ordering: if the unseal gate fails, Vaultwarden must NOT
+      # start (its storage is still sealed). `before` alone would let it start anyway.
+      requiredBy = [ "vaultwarden.service" ];
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;

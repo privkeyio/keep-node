@@ -17,8 +17,12 @@ in
 
     listen = lib.mkOption {
       type = lib.types.str;
-      default = "0.0.0.0:8080";
-      description = "KEEP_WEB_LISTEN address.";
+      default = "127.0.0.1:8080";
+      description = ''
+        KEEP_WEB_LISTEN address. Defaults to loopback: the admin API and NIP-46 bunker are not
+        exposed off-box. Reach them over the encrypted transport (mesh/Tor); bind a wider
+        address and open the firewall explicitly only if you really need direct external access.
+      '';
     };
 
     path = lib.mkOption {

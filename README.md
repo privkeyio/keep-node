@@ -12,7 +12,7 @@ keep-node turns a small Linux box into a private security appliance. Each node r
 
 Part of the [Keep](https://github.com/privkeyio/keep) ecosystem; the node daemon, vault, and threshold signing are reused from [`keep`](https://github.com/privkeyio/keep) (`keep-web`, `keep-core`).
 
-> **Status: early MVP scaffold.** Today it boots Vaultwarden in a NixOS VM (M0). Threshold volume-gating, multi-node sync, and hardware support are in progress.
+> **Status: early MVP scaffold.** Today it boots Vaultwarden and the keep-web daemon in a NixOS VM (M0). Threshold volume-gating, multi-node sync, and hardware support are in progress.
 
 ## Features
 
