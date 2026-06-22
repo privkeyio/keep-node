@@ -61,6 +61,9 @@
           imports = [ ./tests/m0-single-node.nix ];
           _module.args.keepWebPackage = keep-web;
         };
+        m0-frost-gate = pkgs.testers.runNixOSTest {
+          imports = [ ./tests/m0-frost-gate.nix ];
+        };
         formatting = treefmtEval.config.build.check self;
         # m1 = pkgs.testers.runNixOSTest { imports = [ ./tests/m1-ha-failover.nix ]; };  # stub
       };
