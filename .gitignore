@@ -1,0 +1,18 @@
+# Nix
+result
+result-*
+.direnv/
+
+# Build / VM artifacts
+*.qcow2
+*.img
+
+# Editor / OS
+.DS_Store
+*.swp
+
+# Beads / Dolt (local planning only, never committed)
+.beads/
+.dolt/
+*.db
+.beads-credential-key
