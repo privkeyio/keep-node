@@ -1,6 +1,6 @@
-# M0: a single KeepNode boots and serves Vaultwarden.
+# M0: a single KeepNode boots and serves both Vaultwarden and keep-web.
 # Run: nix flake check   (or: nix build .#checks.x86_64-linux.m0)
-{ ... }:
+{ keepWebPackage, ... }:
 {
   name = "keep-node-m0-single-node";
 
@@ -8,14 +8,29 @@
     { ... }:
     {
       imports = [ ../nixos/keep-node.nix ];
+
+      keepNode.keepWeb = {
+        enable = true;
+        package = keepWebPackage;
+        passwordFile = "/etc/keep-node/dev-password";
+      };
+      # Dev-only unlock secret for the VM test. Production unlock is FROST-driven.
+      environment.etc."keep-node/dev-password".text = "dev-password-m0-only";
     };
 
   testScript = ''
     start_all()
+
+    # Vaultwarden (the password manager) comes up.
     node.wait_for_unit("vaultwarden.service")
     node.wait_for_open_port(8222)
-    # Vaultwarden's liveness endpoint returns a timestamp.
     node.succeed("curl -fsS http://localhost:8222/alive")
-    # M0 done = the password manager is up on a freshly booted node.
+
+    # keep-web (the Keep daemon) comes up and serves its unauthenticated health route.
+    node.wait_for_unit("keep-web.service")
+    node.wait_for_open_port(8080)
+    node.succeed("curl -fsS http://localhost:8080/api/health")
+
+    # M0 done = both core services are up on a freshly booted node.
   '';
 }
