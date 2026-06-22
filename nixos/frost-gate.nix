@@ -10,6 +10,20 @@
 # element PLUS the phone share) so the volume key is *threshold*-derived. That is what makes
 # "no single box can decrypt" true; the TPM seal here is the box's local protection only.
 #
+# Scope/limits of v1 (intentional, not gaps to "fix" here):
+#   * Auto-unlocks at boot with no PIN: the node must come back unattended after a power blip,
+#     so this layer is full-disk-encryption at rest only. Making power-on insufficient to
+#     decrypt is v2's job (the FROST quorum needs the phone share, so a powered-on box alone
+#     cannot release the key).
+#   * Bound to PCR 7 only: PCR 7 binding is weak until real measured boot exists. The proper
+#     measured-boot PCR policy lands with the Lanzaboote work, not here.
+#   * No local recovery keyslot: the random bootstrap passphrase is discarded after enrollment
+#     on purpose. Writing a LUKS-unlocking recovery key to the (unencrypted) root would gut the
+#     "steal the box, get nothing" premise. Recovery is the node replicas (other nodes hold the
+#     data) and the v2 FROST quorum (the phone share), never a local secret at rest. The cost:
+#     a PCR 7 change (firmware/Secure Boot/board swap) makes this node's volume unreadable until
+#     re-provisioned from a replica. Fail-closed by design.
+#
 # Vaultwarden hard-requires the mount, so if the volume cannot be unlocked the password
 # manager does not start.
 {
@@ -78,7 +92,6 @@ in
     systemd.services.keep-node-frost-gate = {
       description = "Unseal the FROST-gated vault volume (provision + TPM2 unlock)";
       wantedBy = [ "multi-user.target" ];
-      before = [ "vaultwarden.service" ];
       path = [
         pkgs.cryptsetup
         pkgs.systemd
@@ -96,25 +109,78 @@ in
       # appears after this service runs.
       script = ''
         set -euo pipefail
-        if ! cryptsetup isLuks ${cfg.volumeDevice}; then
-          # First boot: provision. v2 replaces this random key with the FROST-quorum key.
+
+        dev=${cfg.volumeDevice}
+        mapper=${cfg.mapperName}
+        label=keep-node-frost-gate
+
+        # Probe the device directly (don't trust the blkid cache, which can be stale this
+        # early in boot). Our volume is a LUKS container carrying our label. PTTYPE catches a
+        # disk that holds only a partition table (no whole-device signature) so the
+        # wrong-device guard below still refuses it.
+        luks_type="$(blkid -p -o value -s TYPE "$dev" 2>/dev/null || true)"
+        luks_label="$(blkid -p -o value -s LABEL "$dev" 2>/dev/null || true)"
+        pt_type="$(blkid -p -o value -s PTTYPE "$dev" 2>/dev/null || true)"
+
+        # First boot: format + TPM2-enroll + mkfs, atomically. On ANY in-script failure,
+        # wipe our partial work so the next boot retries from a blank device instead of
+        # bricking on a half-provisioned volume (e.g. enroll fails after luksFormat). The
+        # random bootstrap key is discarded; no recovery keyslot is kept (see header).
+        provision() {
+          cleanup() {
+            set +e
+            [ -e /dev/mapper/"$mapper" ] && cryptsetup luksClose "$mapper"
+            wipefs -a "$dev"
+          }
+          trap cleanup ERR
           pass="$(head -c 32 /dev/urandom | base64)"
-          echo -n "$pass" | cryptsetup luksFormat -q --iter-time 1000 ${cfg.volumeDevice} -
-          PASSWORD="$pass" systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=7 ${cfg.volumeDevice}
-          echo -n "$pass" | cryptsetup luksOpen ${cfg.volumeDevice} ${cfg.mapperName} -
-          mkfs.ext4 -F /dev/mapper/${cfg.mapperName}
+          echo -n "$pass" | cryptsetup luksFormat -q --label "$label" --iter-time 1000 "$dev" -
+          # Enroll the TPM2 token and drop the bootstrap passphrase slot in one authenticated
+          # step: PASSWORD unlocks for the enrollment, then the password slot is wiped, leaving
+          # TPM2 as the only keyslot (the documented v1 posture). A standalone wipe would have
+          # no passphrase to authenticate with and would block on a prompt in this no-tty unit.
+          PASSWORD="$pass" systemd-cryptenroll --wipe-slot=password --tpm2-device=auto --tpm2-pcrs=7 "$dev"
           unset pass
-        elif [ ! -e /dev/mapper/${cfg.mapperName} ]; then
-          # Subsequent boots: unlock via the TPM2 token (no passphrase).
-          ${systemdCryptsetup} attach ${cfg.mapperName} ${cfg.volumeDevice} - tpm2-device=auto
+          # Open via the TPM2 token (now the only slot) and lay down the filesystem.
+          ${systemdCryptsetup} attach "$mapper" "$dev" - tpm2-device=auto
+          mkfs.ext4 -F /dev/mapper/"$mapper"
+          trap - ERR
+        }
+
+        if [ "$luks_type" = crypto_LUKS ] && [ "$luks_label" = "$label" ]; then
+          # Capture the enrollment listing first: piping straight into `grep -q` can SIGPIPE
+          # the producer and, under pipefail, misreport a healthy volume as un-enrolled.
+          enrolled="$(systemd-cryptenroll "$dev")"
+          if grep -q tpm2 <<<"$enrolled"; then
+            # Provisioned: unlock via the TPM2 token (no passphrase, PCR 7). Fails closed if
+            # the TPM refuses (e.g. PCR change); vaultwarden then stays down, by design.
+            [ -e /dev/mapper/"$mapper" ] || ${systemdCryptsetup} attach "$mapper" "$dev" - tpm2-device=auto
+          else
+            # Our label but no TPM2 token: a first-boot provision interrupted before/at
+            # enrollment (e.g. power loss). Reclaim our own volume and redo it.
+            wipefs -a "$dev"
+            provision
+          fi
+        elif [ -n "$luks_type" ] || [ -n "$pt_type" ]; then
+          # Device already holds data we did not create (a filesystem/crypto signature or a
+          # partition table). Refuse rather than reformat; this guards a misconfigured
+          # volumeDevice from silently destroying the wrong disk.
+          echo "frost-gate: $dev already holds data (type='$luks_type' pttype='$pt_type') but is not a keep-node volume; refusing to reformat" >&2
+          exit 1
+        else
+          # Blank device: first boot.
+          provision
         fi
+
         mkdir -p ${cfg.dataDir}
-        mountpoint -q ${cfg.dataDir} || mount /dev/mapper/${cfg.mapperName} ${cfg.dataDir}
+        mountpoint -q ${cfg.dataDir} || mount /dev/mapper/"$mapper" ${cfg.dataDir}
       '';
     };
 
     # Vaultwarden starts only once the gate has unsealed and mounted its storage (hard dep).
-    systemd.services.vaultwarden = {
+    # Only wire this when vaultwarden is actually enabled, so enabling the gate alone never
+    # materializes a phantom vaultwarden.service.
+    systemd.services.vaultwarden = lib.mkIf config.services.vaultwarden.enable {
       after = [ "keep-node-frost-gate.service" ];
       requires = [ "keep-node-frost-gate.service" ];
     };

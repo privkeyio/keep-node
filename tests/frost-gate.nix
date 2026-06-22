@@ -33,6 +33,11 @@
     node.succeed("cryptsetup isLuks /dev/vdb")
     node.succeed("systemd-cryptenroll /dev/vdb | grep -q tpm2")
 
+    # Drop a canary into the decrypted volume so the reboot can prove the SAME data came
+    # back (i.e. the volume was unlocked, not silently reformatted).
+    node.succeed("findmnt -n -o SOURCE /var/lib/vaultwarden | grep -q '/dev/mapper/keep-vault'")
+    node.succeed("echo keep-node-canary > /var/lib/vaultwarden/canary")
+
     # Reboot: the gate TPM2-unlocks the volume, it mounts, then Vaultwarden starts off it.
     node.shutdown()
     node.start()
@@ -42,6 +47,9 @@
 
     # The vault data dir IS the decrypted LUKS mapper, and Vaultwarden serves off it.
     node.succeed("findmnt -n -o SOURCE /var/lib/vaultwarden | grep -q '/dev/mapper/keep-vault'")
+
+    # The canary survived: the gate unlocked the existing volume rather than reformatting.
+    node.succeed("grep -qx keep-node-canary /var/lib/vaultwarden/canary")
     node.wait_for_open_port(8222)
     node.succeed("curl -fsS http://localhost:8222/alive")
   '';
