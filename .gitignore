@@ -7,6 +7,9 @@ result-*
 *.qcow2
 *.img
 
+# mdBook output (built by the docs.privkey.io aggregator)
+book/
+
 # Editor / OS
 .DS_Store
 *.swp
