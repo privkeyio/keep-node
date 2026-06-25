@@ -43,10 +43,29 @@
         doCheck = false; # workspace tests, not needed to ship the binary
         meta.mainProgram = "keep-web";
       };
+
+      # keep-cli (binary `keep`): drives the FROST/OPRF threshold unlock at boot
+      # (frost-gate mode=oprf). Built from the same source, just a different workspace crate.
+      # serialport (hardware-signer dep) needs libudev at build time, hence udev/systemd.
+      keep-cli = pkgs.rustPlatform.buildRustPackage {
+        pname = "keep-cli";
+        version = "0.4.9";
+        src = keep;
+        cargoLock.lockFile = "${keep}/Cargo.lock";
+        buildAndTestSubdir = "keep-cli";
+        nativeBuildInputs = [ pkgs.pkg-config ];
+        buildInputs = [
+          pkgs.openssl
+          pkgs.udev
+          pkgs.systemd
+        ];
+        doCheck = false; # workspace tests, not needed to ship the binary
+        meta.mainProgram = "keep";
+      };
     in
     {
       packages.${system} = {
-        inherit keep-web;
+        inherit keep-web keep-cli;
         default = keep-web;
       };
 
