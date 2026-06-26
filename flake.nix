@@ -26,6 +26,9 @@
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
 
+      # Pinned once: keep-web and keep-cli build from the same `keep` source revision.
+      keepVersion = "0.4.9";
+
       treefmtEval = treefmt-nix.lib.evalModule pkgs {
         projectRootFile = "flake.nix";
         programs.nixfmt.enable = true;
@@ -33,7 +36,7 @@
 
       keep-web = pkgs.rustPlatform.buildRustPackage {
         pname = "keep-web";
-        version = "0.4.9";
+        version = keepVersion;
         src = keep;
         cargoLock.lockFile = "${keep}/Cargo.lock";
         # Build only the keep-web crate from the workspace.
@@ -49,7 +52,7 @@
       # serialport (hardware-signer dep) needs libudev at build time, hence udev/systemd.
       keep-cli = pkgs.rustPlatform.buildRustPackage {
         pname = "keep-cli";
-        version = "0.4.9";
+        version = keepVersion;
         src = keep;
         cargoLock.lockFile = "${keep}/Cargo.lock";
         buildAndTestSubdir = "keep-cli";

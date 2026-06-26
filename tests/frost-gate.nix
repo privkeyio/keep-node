@@ -1,6 +1,11 @@
-# frost-gate v1: Vaultwarden's data dir is a TPM-sealed LUKS volume, auto-unlocked at boot.
-# Grounded in nixpkgs nixos/tests/systemd-cryptenroll.nix (emptyDiskImages + tpm.enable +
-# systemd-cryptenroll --tpm2-device=auto), unlocked by the keep-node-frost-gate service.
+# frost-gate: Vaultwarden's data dir is an encrypted LUKS volume gated at boot.
+#   node  - mode = "tpm" (v1): TPM-sealed LUKS volume, auto-unlocked at boot. Grounded in nixpkgs
+#           nixos/tests/systemd-cryptenroll.nix (emptyDiskImages + tpm.enable +
+#           systemd-cryptenroll --tpm2-device=auto), unlocked by the keep-node-frost-gate service.
+#   oprf  - mode = "oprf" (v2): threshold-OPRF quorum unlock. The live relay + remote holders and
+#           the TPM-sealed credentials are NOT reproduced in the VM (`keep` is a stub, no holders
+#           online), so this leg covers config evaluation, systemd unit wiring, and the fail-closed
+#           posture rather than a real end-to-end quorum unlock (which needs external infra).
 # Run: nix build .#checks.x86_64-linux.frost-gate
 { ... }:
 {
@@ -22,6 +27,38 @@
       virtualisation = {
         emptyDiskImages = [ 512 ]; # /dev/vdb, the vault volume
         tpm.enable = true; # swtpm
+      };
+    };
+
+  # mode = "oprf" wiring + fail-closed coverage. `keep` is stubbed: the fail-closed paths
+  # exercised here (missing TPM-sealed creds, blank/unprovisioned device) never reach the binary,
+  # so a stub is sufficient and avoids building keep-cli in the VM. A true end-to-end OPRF unlock
+  # needs the external relay + holder quorum and is out of scope for this harness.
+  nodes.oprf =
+    { pkgs, ... }:
+    {
+      imports = [ ../nixos/keep-node.nix ];
+
+      keepNode.frostGate = {
+        enable = true;
+        mode = "oprf";
+        volumeDevice = "/dev/vdb";
+        keepPackage = pkgs.writeShellScriptBin "keep" ''
+          echo "stub keep invoked (no live OPRF quorum in the VM): $*" >&2
+          exit 1
+        '';
+        keepDbPath = "/var/lib/keep";
+        group = "npub1stubgroup";
+        relay = "ws://127.0.0.1:7777";
+        keepPasswordCred = "/var/lib/keep-node/keep-password.cred";
+        oprfShareCred = "/var/lib/keep-node/oprf-share.cred";
+      };
+
+      environment.systemPackages = [ pkgs.cryptsetup ];
+
+      virtualisation = {
+        emptyDiskImages = [ 512 ];
+        tpm.enable = true;
       };
     };
 
@@ -79,5 +116,39 @@
     node.succeed("cryptsetup isLuks /dev/vdb")
     node.succeed("cryptsetup luksDump /dev/vdb | grep -q keep-node-frost-gate")
     node.succeed("cryptsetup luksDump /dev/vdb | grep -q keep-node-provisioned")
+
+    # --- mode = "oprf": config evaluation, unit wiring, fail-closed posture. ---
+    # The live threshold-OPRF quorum (relay + remote holders) and the TPM-sealed credentials are
+    # NOT reproduced here, so this does NOT assert a real unlock. It asserts the oprf config
+    # evaluates, the units are wired as intended, and that with no usable credentials/quorum the
+    # gate stays locked and vaultwarden never starts (fail-closed). End-to-end OPRF unlock needs
+    # the external relay/holder infrastructure and is out of scope for the VM harness.
+    oprf.start()
+
+    # The operator-driven provision unit exists but is NOT wired into boot (no WantedBy).
+    oprf.succeed("systemctl cat keep-node-frost-provision.service")
+    oprf.succeed(
+        'test -z "$(systemctl show -p WantedBy --value keep-node-frost-provision.service)"'
+    )
+
+    # The gate carries the oprf wiring: both encrypted credentials are loaded...
+    oprf.succeed(
+        "systemctl show keep-node-frost-gate.service -p LoadCredentialEncrypted | grep -q keep-password"
+    )
+    oprf.succeed(
+        "systemctl show keep-node-frost-gate.service -p LoadCredentialEncrypted | grep -q oprf-share"
+    )
+    # ...and the boot unlock is time-bounded (a hung relay can't stall boot forever).
+    oprf.succeed(
+        'test "$(systemctl show -p TimeoutStartUSec --value keep-node-frost-gate.service)" != infinity'
+    )
+
+    # Fail-closed: with no quorum and no TPM-sealed creds the gate fails, the volume is never
+    # unlocked, and vaultwarden (hard dep) never starts off a plaintext/wrong device.
+    oprf.wait_until_succeeds("systemctl is-failed --quiet keep-node-frost-gate.service")
+    oprf.fail("test -e /dev/mapper/keep-vault")
+    oprf.fail("systemctl is-active --quiet vaultwarden.service")
+    # The blank vault device was not touched (no LUKS signature written by the failed gate).
+    oprf.fail("cryptsetup isLuks /dev/vdb")
   '';
 }

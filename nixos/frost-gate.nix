@@ -36,23 +36,52 @@ let
   cfg = config.keepNode.frostGate;
   systemdCryptsetup = "${pkgs.systemd}/lib/systemd/systemd-cryptsetup";
 
-  # mode = "oprf": every-boot unlock. The keep DB password and this box's OPRF share are
-  # TPM-decrypted (PCR 7) by systemd into $CREDENTIALS_DIRECTORY (ramfs) before this runs; the
-  # quorum reconstructs the 32-byte LUKS key, which we pipe straight into cryptsetup (it never
-  # touches disk). Fail-closed: any missing/changed PCR, absent marker, or failed quorum leaves
-  # the volume locked and vaultwarden down. OPRF provisioning is operator-driven (the holders
-  # must be online), so a blank/unprovisioned device does NOT auto-format here (unlike v1 TPM).
-  oprfGateScript = ''
-    set -euo pipefail
+  # The LUKS2 label stamped on our container; the wrong-device guards key off it.
+  label = "keep-node-frost-gate";
 
-    dev=${cfg.volumeDevice}
-    mapper=${cfg.mapperName}
-    label=keep-node-frost-gate
-
-    # Probe the device directly (the blkid cache can be stale this early in boot).
+  # Probe a block device directly (the blkid cache can be stale this early in boot). Sets
+  # luks_type / luks_label / pt_type for the caller's wrong-device guard. $dev must be set.
+  # PTTYPE catches a disk that holds only a partition table (no whole-device signature).
+  probeBlock = ''
     luks_type="$(blkid -p -o value -s TYPE "$dev" 2>/dev/null || true)"
     luks_label="$(blkid -p -o value -s LABEL "$dev" 2>/dev/null || true)"
     pt_type="$(blkid -p -o value -s PTTYPE "$dev" 2>/dev/null || true)"
+  '';
+
+  # Ensure dataDir exists and our decrypted mapper is the thing mounted there. If dataDir
+  # already has some OTHER source mounted, fail closed rather than write plaintext into a
+  # location backed by the wrong (possibly unencrypted) device. $mapper must be set.
+  mountTail = ''
+    mkdir -p ${lib.escapeShellArg cfg.dataDir}
+    if mountpoint -q ${lib.escapeShellArg cfg.dataDir}; then
+      cur="$(findmnt -no SOURCE ${lib.escapeShellArg cfg.dataDir} || true)"
+      if [ "$cur" != "/dev/mapper/$mapper" ]; then
+        echo "frost-gate: ${cfg.dataDir} already has '$cur' mounted (expected /dev/mapper/$mapper); refusing to proceed" >&2
+        exit 1
+      fi
+    else
+      mount /dev/mapper/"$mapper" ${lib.escapeShellArg cfg.dataDir}
+    fi
+  '';
+
+  # mode = "oprf": every-boot unlock. The keep DB password and this box's OPRF share are
+  # TPM-decrypted (PCR 7) by systemd into $CREDENTIALS_DIRECTORY (ramfs) before this runs; the
+  # quorum reconstructs the 32-byte LUKS key into a RAM-only file ($RUNTIME_DIRECTORY tmpfs) that
+  # feeds cryptsetup (it never touches persistent disk). Fail-closed: any missing/changed PCR,
+  # absent marker, or failed quorum leaves
+  # the volume locked and vaultwarden down. OPRF provisioning is operator-driven (the holders
+  # must be online), so a blank/unprovisioned device does NOT auto-format here (unlike v1 TPM).
+  # Deployment requirement (M1): the "no single box can decrypt" property holds only if the
+  # external keep relay authenticates + throttles unlock requests and the box is bound by a real
+  # measured-boot PCR policy. Both are external to this repo (relay infra + Lanzaboote).
+  oprfGateScript = ''
+    set -euo pipefail
+
+    dev=${lib.escapeShellArg cfg.volumeDevice}
+    mapper=${lib.escapeShellArg cfg.mapperName}
+    label=${lib.escapeShellArg label}
+
+    ${probeBlock}
 
     if [ "$luks_type" = crypto_LUKS ] && [ "$luks_label" = "$label" ]; then
       # Capture the dump first: piping into `grep -q` can SIGPIPE the producer and, under
@@ -62,12 +91,21 @@ let
         # OPRF-provisioned: reconstruct the LUKS key from the quorum and open. The key is the
         # only thing on the CLI's stdout; everything else goes to stderr.
         if [ ! -e /dev/mapper/"$mapper" ]; then
-          KEEP_PASSWORD="$(cat "$CREDENTIALS_DIRECTORY/keep-password")" \
-            ${cfg.keepPackage}/bin/keep --path ${cfg.keepDbPath} frost network oprf-unlock \
-              --group ${cfg.group} --relay ${cfg.relay} --share ${toString cfg.shareIndex} \
-              --volume-id ${cfg.volumeId} --epoch ${toString cfg.epoch} \
-              --share-file "$CREDENTIALS_DIRECTORY/oprf-share" \
-            | cryptsetup open --key-file - --keyfile-size 32 "$dev" "$mapper"
+          # Capture the 32-byte key to a RAM-only file (RuntimeDirectory is tmpfs under /run)
+          # instead of piping straight into cryptsetup: cryptsetup reads only 32 bytes then
+          # closes the pipe, and any trailing write by `keep` would take SIGPIPE which, under
+          # pipefail, turns a correct unlock into a unit failure (boot fails closed). The key
+          # never touches persistent disk and is removed immediately after open.
+          keyf="$RUNTIME_DIRECTORY/luks.key"
+          ( umask 077
+            KEEP_PASSWORD="$(cat "$CREDENTIALS_DIRECTORY/keep-password")" \
+              ${cfg.keepPackage}/bin/keep --path ${lib.escapeShellArg cfg.keepDbPath} frost network oprf-unlock \
+                --group ${lib.escapeShellArg cfg.group} --relay ${lib.escapeShellArg cfg.relay} --share ${toString cfg.shareIndex} \
+                --volume-id ${lib.escapeShellArg cfg.volumeId} --epoch ${toString cfg.epoch} \
+                --share-file "$CREDENTIALS_DIRECTORY/oprf-share" \
+                > "$keyf" )
+          cryptsetup open --key-file "$keyf" --keyfile-size 32 "$dev" "$mapper"
+          rm -f "$keyf"
         fi
       else
         # Our LUKS label but no OPRF completion marker: never provisioned for OPRF (or an
@@ -87,39 +125,56 @@ let
       exit 1
     fi
 
-    mkdir -p ${cfg.dataDir}
-    mountpoint -q ${cfg.dataDir} || mount /dev/mapper/"$mapper" ${cfg.dataDir}
+    ${mountTail}
   '';
 
   # Operator-driven one-time setup (NOT wantedBy boot). Needs KEEP_PASSWORD in the environment
-  # and the OPRF holders online. Generates + distributes the OPRF key, seals this box's share and
-  # the keep DB password to the TPM (PCR 7) as systemd-creds blobs, then LUKS-formats the volume
-  # with the OPRF-derived key. All tmp secrets live on a private tmpfs and are shredded on exit.
+  # and the OPRF holders online. Generates + distributes the OPRF key, LUKS-formats the volume
+  # with the OPRF-derived key, then seals this box's share and the keep DB password to the TPM
+  # (PCR 7) as systemd-creds blobs. The transient LUKS key + share live on the unit's PrivateTmp
+  # tmpfs: protection comes from that tmpfs being RAM-only and torn down when the unit exits, NOT
+  # from secure erase (shred cannot guarantee erasure on tmpfs / copy-on-write backing).
   oprfProvisionScript = ''
     set -euo pipefail
 
-    dev=${cfg.volumeDevice}
-    mapper=${cfg.mapperName}
-    label=keep-node-frost-gate
+    dev=${lib.escapeShellArg cfg.volumeDevice}
+    mapper=${lib.escapeShellArg cfg.mapperName}
+    label=${lib.escapeShellArg label}
+    shareCred=${lib.escapeShellArg cfg.oprfShareCred}
+    passCred=${lib.escapeShellArg cfg.keepPasswordCred}
 
-    : "''${KEEP_PASSWORD:?set KEEP_PASSWORD in the environment before provisioning}"
+    : "''${KEEP_PASSWORD:?set KEEP_PASSWORD in the environment before provisioning (see the unit comments)}"
 
     tmpdir="$(mktemp -d)"
     keyfile="$tmpdir/luks.key"
     sharefile="$tmpdir/oprf.share"
+
+    # Failure rollback: undo partial on-disk work so a retry starts from a clean device. Removes
+    # any half-written sealed creds, closes the mapper, and wipes the (possibly half-formatted)
+    # LUKS header. The OPRF key already distributed to the holders in step 1 is inherent to the
+    # quorum and cannot be recalled here; a retry re-runs provisioning against the same epoch.
+    provisioned=0
+    rollback() {
+      set +e
+      [ "$provisioned" = 1 ] && return 0
+      rm -f "$shareCred" "$passCred"
+      [ -e /dev/mapper/"$mapper" ] && cryptsetup close "$mapper"
+      wipefs -a "$dev" 2>/dev/null
+    }
+    # tmpfs teardown happens on EXIT regardless of outcome; also close the mapper so the next
+    # boot's gate (not this unit) opens it via the quorum.
     cleanup() {
       set +e
-      [ -e "$keyfile" ] && shred -u "$keyfile"
-      [ -e "$sharefile" ] && shred -u "$sharefile"
+      [ -e /dev/mapper/"$mapper" ] && cryptsetup close "$mapper"
+      rm -f "$keyfile" "$sharefile"
       rm -rf "$tmpdir"
     }
+    trap rollback ERR
     trap cleanup EXIT
 
     # Wrong-device guard: refuse to clobber a device that already holds data we did not create,
     # and refuse to re-provision an already-OPRF volume (that would destroy its data).
-    luks_type="$(blkid -p -o value -s TYPE "$dev" 2>/dev/null || true)"
-    luks_label="$(blkid -p -o value -s LABEL "$dev" 2>/dev/null || true)"
-    pt_type="$(blkid -p -o value -s PTTYPE "$dev" 2>/dev/null || true)"
+    ${probeBlock}
     if [ "$luks_type" = crypto_LUKS ] && [ "$luks_label" = "$label" ]; then
       if cryptsetup luksDump "$dev" | grep -q keep-node-oprf; then
         echo "frost-gate(oprf): $dev is already OPRF-provisioned; refusing to re-provision (would destroy data)." >&2
@@ -131,31 +186,35 @@ let
     fi
 
     # 1. Generate + distribute the OPRF key; emit the 32-byte LUKS key and this box's 64-byte
-    #    share to the private tmpfs (the CLI writes them 0600 and only on successful distribution).
+    #    share to the PrivateTmp tmpfs (the CLI writes them 0600 and only on successful distribution).
     KEEP_PASSWORD="$KEEP_PASSWORD" \
-      ${cfg.keepPackage}/bin/keep --path ${cfg.keepDbPath} frost network oprf-provision \
-        --group ${cfg.group} --relay ${cfg.relay} --share ${toString cfg.shareIndex} \
-        --volume-id ${cfg.volumeId} --epoch ${toString cfg.epoch} \
+      ${cfg.keepPackage}/bin/keep --path ${lib.escapeShellArg cfg.keepDbPath} frost network oprf-provision \
+        --group ${lib.escapeShellArg cfg.group} --relay ${lib.escapeShellArg cfg.relay} --share ${toString cfg.shareIndex} \
+        --volume-id ${lib.escapeShellArg cfg.volumeId} --epoch ${toString cfg.epoch} \
         --threshold ${toString cfg.quorum.threshold} --total ${toString cfg.quorum.total} \
         --key-out "$keyfile" --share-out "$sharefile"
 
-    # 2. Seal this box's OPRF share and the keep DB password to the TPM (PCR 7). At boot systemd
-    #    re-decrypts these into the gate unit's $CREDENTIALS_DIRECTORY; a PCR change fails closed.
-    install -d -m 0700 "$(dirname ${cfg.oprfShareCred})"
-    install -d -m 0700 "$(dirname ${cfg.keepPasswordCred})"
-    systemd-creds encrypt --with-key=tpm2 --tpm2-pcrs=7 --name=oprf-share "$sharefile" ${cfg.oprfShareCred}
-    printf '%s' "$KEEP_PASSWORD" \
-      | systemd-creds encrypt --with-key=tpm2 --tpm2-pcrs=7 --name=keep-password - ${cfg.keepPasswordCred}
-
-    # 3. Lay down the LUKS volume keyed by the OPRF-derived 32-byte LUKS key, open it, mkfs.
+    # 2. Lay down the LUKS volume keyed by the OPRF-derived 32-byte LUKS key, open it, mkfs. Do
+    #    this BEFORE sealing creds so a format/mkfs failure can't leave orphaned sealed creds for
+    #    a volume that never formed (the rollback above wipes the header on any error).
     cryptsetup luksFormat -q --label "$label" --key-file "$keyfile" --keyfile-size 32 "$dev"
     cryptsetup open --key-file "$keyfile" --keyfile-size 32 "$dev" "$mapper"
     mkfs.ext4 -F /dev/mapper/"$mapper"
 
+    # 3. Seal this box's OPRF share and the keep DB password to the TPM (PCR 7). At boot systemd
+    #    re-decrypts these into the gate unit's $CREDENTIALS_DIRECTORY; a PCR change fails closed.
+    install -d -m 0700 "$(dirname "$shareCred")"
+    install -d -m 0700 "$(dirname "$passCred")"
+    systemd-creds encrypt --with-key=tpm2 --tpm2-pcrs=7 --name=oprf-share "$sharefile" "$shareCred"
+    printf '%s' "$KEEP_PASSWORD" \
+      | systemd-creds encrypt --with-key=tpm2 --tpm2-pcrs=7 --name=keep-password - "$passCred"
+
     # 4. Completion marker (distinct from v1's keep-node-provisioned): the gate reads this to know
     #    the volume is OPRF-provisioned. Re-set --label in the same call (--subsystem alone clears
-    #    the label, which the wrong-device guard relies on).
+    #    the label, which the wrong-device guard relies on). Last step: its presence implies the
+    #    volume formed AND the creds sealed, so the gate can trust it.
     cryptsetup config "$dev" --label "$label" --subsystem keep-node-oprf
+    provisioned=1
 
     echo "frost-gate(oprf): provisioned $dev. Reboot to unlock via the quorum." >&2
   '';
@@ -276,6 +335,19 @@ in
         the clear). Required for mode = "oprf".
       '';
     };
+
+    keepPasswordEnvFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = ''
+        Optional path to a 0400 systemd EnvironmentFile (containing `KEEP_PASSWORD=...`) that
+        feeds the keep DB password to the operator-driven provision unit (mode = "oprf"). If set,
+        it is wired as the provision unit's EnvironmentFile. If null, deliver the password ad hoc,
+        e.g. `systemd-run -E KEEP_PASSWORD --pipe --wait --service-type=oneshot keep ...` against
+        the provision script. Do NOT use `systemctl set-environment` to pass it: that leaks the
+        password into the global systemd manager environment.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -341,6 +413,13 @@ in
           "keep-password:${toString cfg.keepPasswordCred}"
           "oprf-share:${toString cfg.oprfShareCred}"
         ];
+        # RAM-only ($RUNTIME_DIRECTORY is tmpfs under /run) scratch for the reconstructed LUKS
+        # key, so it is fed to cryptsetup from a file rather than a SIGPIPE-prone pipe.
+        RuntimeDirectory = "keep-node-frost-gate";
+        RuntimeDirectoryMode = "0700";
+        # Bound the boot unlock: a hostile or hung relay must not stall the gate (and thus boot)
+        # indefinitely. On timeout the unit fails and the volume stays locked (fail-closed).
+        TimeoutStartSec = 90;
       };
       # Provision (first boot) or TPM2-unlock (later boots), then mount the volume at the data
       # dir. Doing the mount here (rather than a declarative fileSystems entry) keeps the
@@ -353,17 +432,11 @@ in
           ''
             set -euo pipefail
 
-            dev=${cfg.volumeDevice}
-            mapper=${cfg.mapperName}
-            label=keep-node-frost-gate
+            dev=${lib.escapeShellArg cfg.volumeDevice}
+            mapper=${lib.escapeShellArg cfg.mapperName}
+            label=${lib.escapeShellArg label}
 
-            # Probe the device directly (don't trust the blkid cache, which can be stale this
-            # early in boot). Our volume is a LUKS container carrying our label. PTTYPE catches a
-            # disk that holds only a partition table (no whole-device signature) so the
-            # wrong-device guard below still refuses it.
-            luks_type="$(blkid -p -o value -s TYPE "$dev" 2>/dev/null || true)"
-            luks_label="$(blkid -p -o value -s LABEL "$dev" 2>/dev/null || true)"
-            pt_type="$(blkid -p -o value -s PTTYPE "$dev" 2>/dev/null || true)"
+            ${probeBlock}
 
             # First boot: format + TPM2-enroll + mkfs, atomically. On ANY in-script failure,
             # wipe our partial work so the next boot retries from a blank device instead of
@@ -432,15 +505,21 @@ in
               provision
             fi
 
-            mkdir -p ${cfg.dataDir}
-            mountpoint -q ${cfg.dataDir} || mount /dev/mapper/"$mapper" ${cfg.dataDir}
+            ${mountTail}
           '';
     };
 
-    # Operator-driven OPRF provisioning (mode = "oprf" only). NOT wantedBy boot: the operator
-    # runs `systemctl start keep-node-frost-provision` with KEEP_PASSWORD in the environment and
-    # the OPRF holders (phone + replica) online. It distributes the OPRF key, seals this box's
-    # share + the keep DB password to the TPM, and formats the volume.
+    # Operator-driven OPRF provisioning (mode = "oprf" only). NOT wantedBy boot. It needs
+    # KEEP_PASSWORD in its environment and the OPRF holders (phone + replica) online; it
+    # distributes the OPRF key, formats the volume, and seals this box's share + the keep DB
+    # password to the TPM.
+    #
+    # Delivering KEEP_PASSWORD (a plain `systemctl start` runs in a clean env, so the password
+    # must be injected): set `keepPasswordEnvFile` to a 0400 EnvironmentFile (KEEP_PASSWORD=...)
+    # and `systemctl start keep-node-frost-provision`, or pass it ad hoc without a file via
+    #   systemd-run -E KEEP_PASSWORD --pipe --wait --service-type=oneshot \
+    #     --property=PrivateTmp=yes keep ...
+    # Never `systemctl set-environment KEEP_PASSWORD=...` (leaks it into the global manager env).
     systemd.services.keep-node-frost-provision = lib.mkIf (cfg.mode == "oprf") {
       description = "Provision the FROST-gated vault volume (threshold-OPRF, operator-driven)";
       path = [
@@ -453,8 +532,11 @@ in
       ];
       serviceConfig = {
         Type = "oneshot";
-        # Private tmpfs for the transient LUKS key + OPRF share before they are sealed/shredded.
+        # Private tmpfs for the transient LUKS key + OPRF share; torn down when the unit exits.
         PrivateTmp = true;
+      }
+      // lib.optionalAttrs (cfg.keepPasswordEnvFile != null) {
+        EnvironmentFile = cfg.keepPasswordEnvFile;
       };
       script = oprfProvisionScript;
     };
