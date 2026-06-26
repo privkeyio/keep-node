@@ -131,12 +131,13 @@
         'test -z "$(systemctl show -p WantedBy --value keep-node-frost-provision.service)"'
     )
 
-    # The gate carries the oprf wiring: both encrypted credentials are loaded...
+    # The gate carries the oprf wiring: both encrypted credentials are loaded. Read the rendered
+    # unit file (`systemctl show -p LoadCredentialEncrypted` does not surface the credential IDs).
     oprf.succeed(
-        "systemctl show keep-node-frost-gate.service -p LoadCredentialEncrypted | grep -q keep-password"
+        "systemctl cat keep-node-frost-gate.service | grep -q 'LoadCredentialEncrypted=keep-password:'"
     )
     oprf.succeed(
-        "systemctl show keep-node-frost-gate.service -p LoadCredentialEncrypted | grep -q oprf-share"
+        "systemctl cat keep-node-frost-gate.service | grep -q 'LoadCredentialEncrypted=oprf-share:'"
     )
     # ...and the boot unlock is time-bounded (a hung relay can't stall boot forever).
     oprf.succeed(
