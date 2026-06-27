@@ -56,7 +56,7 @@ let
     if mountpoint -q ${lib.escapeShellArg cfg.dataDir}; then
       cur="$(findmnt -no SOURCE ${lib.escapeShellArg cfg.dataDir} || true)"
       if [ "$cur" != "/dev/mapper/$mapper" ]; then
-        echo "frost-gate: ${cfg.dataDir} already has '$cur' mounted (expected /dev/mapper/$mapper); refusing to proceed" >&2
+        echo "frost-gate: ${lib.escapeShellArg cfg.dataDir} already has '$cur' mounted (expected /dev/mapper/$mapper); refusing to proceed" >&2
         exit 1
       fi
     else
@@ -97,7 +97,7 @@ let
           # pipefail, turns a correct unlock into a unit failure (boot fails closed). The key
           # never touches persistent disk and is removed immediately after open.
           keyf="$RUNTIME_DIRECTORY/luks.key"
-          trap 'rm -f "$keyf"' EXIT
+          trap 'rm -f "$keyf"' EXIT TERM INT
           ( umask 077
             KEEP_PASSWORD="$(cat "$CREDENTIALS_DIRECTORY/keep-password")" \
               ${cfg.keepPackage}/bin/keep --path ${lib.escapeShellArg cfg.keepDbPath} frost network oprf-unlock \
@@ -259,10 +259,15 @@ let
     ${probeBlock}
     if [ "$luks_type" = crypto_LUKS ] && [ "$luks_label" = "$label" ]; then
       # Capture the dump first: piping into `grep -q` can SIGPIPE the producer and, under
-      # pipefail, misreport an already-OPRF volume as un-provisioned and reformat it.
-      dump="$(cryptsetup luksDump "$dev")"
+      # pipefail, misreport an already-OPRF volume as un-provisioned and reformat it. Use
+      # `|| true` so a transient luksDump failure cannot trip the rollback ERR trap (which
+      # would wipefs the very volume this guard protects).
+      dump="$(cryptsetup luksDump "$dev" || true)"
       if grep -q keep-node-oprf <<<"$dump"; then
         echo "frost-gate(oprf): $dev is already OPRF-provisioned; refusing to re-provision (would destroy data)." >&2
+        exit 1
+      elif grep -q keep-node-provisioned <<<"$dump"; then
+        echo "frost-gate(oprf): $dev is already provisioned as a v1/tpm volume; refusing to reformat (would destroy data)." >&2
         exit 1
       fi
     elif [ -n "$luks_type" ] || [ -n "$pt_type" ]; then
@@ -444,6 +449,10 @@ in
       {
         assertion = cfg.quorum.threshold <= cfg.quorum.total && cfg.quorum.threshold >= 1;
         message = "keepNode.frostGate.quorum: need 1 <= threshold <= total.";
+      }
+      {
+        assertion = cfg.mode != "oprf" || cfg.quorum.threshold >= 2;
+        message = "keepNode.frostGate.mode = \"oprf\" requires quorum.threshold >= 2 (threshold=1 collapses the threshold model).";
       }
       {
         assertion =
