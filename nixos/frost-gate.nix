@@ -52,15 +52,16 @@ let
   # already has some OTHER source mounted, fail closed rather than write plaintext into a
   # location backed by the wrong (possibly unencrypted) device. $mapper must be set.
   mountTail = ''
-    mkdir -p ${lib.escapeShellArg cfg.dataDir}
-    if mountpoint -q ${lib.escapeShellArg cfg.dataDir}; then
-      cur="$(findmnt -no SOURCE ${lib.escapeShellArg cfg.dataDir} || true)"
+    dd=${lib.escapeShellArg cfg.dataDir}
+    mkdir -p "$dd"
+    if mountpoint -q "$dd"; then
+      cur="$(findmnt -no SOURCE "$dd" || true)"
       if [ "$cur" != "/dev/mapper/$mapper" ]; then
-        echo "frost-gate: ${lib.escapeShellArg cfg.dataDir} already has '$cur' mounted (expected /dev/mapper/$mapper); refusing to proceed" >&2
+        echo "frost-gate: $dd already has '$cur' mounted (expected /dev/mapper/$mapper); refusing to proceed" >&2
         exit 1
       fi
     else
-      mount /dev/mapper/"$mapper" ${lib.escapeShellArg cfg.dataDir}
+      mount /dev/mapper/"$mapper" "$dd"
     fi
   '';
 
@@ -97,7 +98,10 @@ let
           # pipefail, turns a correct unlock into a unit failure (boot fails closed). The key
           # never touches persistent disk and is removed immediately after open.
           keyf="$RUNTIME_DIRECTORY/luks.key"
-          trap 'rm -f "$keyf"' EXIT TERM INT
+          trap 'rm -f "$keyf"' EXIT
+          # On a stop-timeout SIGTERM (or INT) scrub the key, then actually terminate rather
+          # than resuming: the explicit exit fires the EXIT trap too (idempotent rm -f).
+          trap 'rm -f "$keyf"; exit 1' TERM INT
           ( umask 077
             KEEP_PASSWORD="$(cat "$CREDENTIALS_DIRECTORY/keep-password")" \
               ${cfg.keepPackage}/bin/keep --path ${lib.escapeShellArg cfg.keepDbPath} frost network oprf-unlock \
