@@ -327,7 +327,17 @@ in
         Unlock backend. "tpm" (v1): the LUKS key is sealed to this box's TPM (PCR 7), so a
         powered-on box unlocks itself unattended. "oprf" (v2): the LUKS key is reconstructed at
         boot from a 2-of-3 threshold-OPRF quorum (this box's TPM-sealed OPRF share PLUS the
-        remote holders), so a powered-on box alone cannot release the key.
+        remote holders).
+
+        SECURITY: "oprf" is NOT yet a meaningful threshold gate on its own. The box's OPRF share
+        is sealed only to PCR 7 (Secure Boot state, trivially reproducible), so a stolen or
+        rebooted box gets its own share back; if a remote holder then auto-answers, that box alone
+        reaches the 2-of-3 threshold without the phone. The "a powered-on box cannot self-decrypt"
+        property holds ONLY once the M1 deployment requirements are met: the holders/relay
+        authenticate, throttle, and gate (do not auto-approve) unlock requests, AND the box is
+        sealed under a real measured-boot PCR policy (e.g. Lanzaboote / PCR 11), not bare PCR 7.
+        Both are external to this module. Until both are in place, treat "oprf" as full-disk
+        encryption with a TPM-released key, no stronger than "tpm".
       '';
     };
 
