@@ -22,10 +22,13 @@
   nodes.relay =
     { ... }:
     {
+      # The relay binds 0.0.0.0 by default; the nixpkgs module hardcodes
+      # network = { port = ...; } and discards any settings.network.address via a
+      # shallow `//` merge, so setting it here is inert. The default is already what
+      # the box/holder VMs need to reach it cross-node.
       services.nostr-rs-relay = {
         enable = true;
         port = 7777;
-        settings.network.address = "0.0.0.0";
       };
       networking.firewall.allowedTCPPorts = [ 7777 ];
     };
@@ -69,6 +72,11 @@
             f"--setenv=KEEP_PASSWORD=testpassword123 --setenv=KEEP_YES=1 --setenv=KEEP_ALLOW_WS=1 "
             f"{keep} --no-mlock {args}"
         )
+        # Fail fast (and name the unit) if the long-lived process crashed on startup,
+        # e.g. a bad flag or an unreachable relay, instead of surfacing later as an
+        # opaque downstream timeout. The subsequent sleeps remain as relay-propagation
+        # margin (subscription/announce landing has no externally observable signal).
+        node.wait_until_succeeds(f"systemctl is-active --quiet {unit}.service", timeout=15)
 
     start_all()
     relay.wait_for_unit("nostr-rs-relay.service")
@@ -153,5 +161,20 @@
     provisioned = box.succeed("xxd -p /root/luks.key | tr -d '\\n'").strip()
     assert len(provisioned) == 64, f"expected a 32-byte LUKS key, got {provisioned!r}"
     assert unlocked == provisioned, f"unlock key {unlocked!r} != provisioned {provisioned!r}"
+
+    # --- 6. Below threshold: with the lone holder offline the box holds a single share
+    # (< threshold 2), so the unlock must FAIL CLOSED and never reconstruct the key. ---
+    holder.succeed("systemctl stop holder-serve2.service")
+    # `timeout` bounds a hung quorum wait, so a never-answered request fails closed here
+    # rather than stalling the test forever.
+    box.fail(
+        f"{env} timeout 30 {keep} --no-mlock --path /root/box frost network oprf-unlock "
+        f"--group {npub} --relay {relay_url} --volume-id vault0 "
+        f"--share-file /root/box-oprf.share --tpm-tcti device:/dev/tpmrm0 "
+        f"> /root/neg-unlock.out 2>/root/neg-unlock.err"
+    )
+    # ...and it emitted no usable key material: a failed unlock must not leak a 32-byte key.
+    neg_size = box.succeed("stat -c %s /root/neg-unlock.out").strip()
+    assert neg_size != "32", f"below-threshold unlock leaked a 32-byte key ({neg_size} bytes)"
   '';
 }
