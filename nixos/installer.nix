@@ -14,17 +14,25 @@ let
     if [ "$(id -u)" -ne 0 ]; then exec sudo -- "$0" "$@"; fi
 
     disk="''${1:-}"
-    if [ -z "$disk" ] || [ ! -b "$disk" ]; then
-      echo "usage: install-keepnode /dev/DISK"
+    # Resolve symlinks (by-id/by-path) to the kernel name so the partition-suffix logic below
+    # and the wipe act on the canonical whole-disk node.
+    if [ -n "$disk" ] && [ -b "$disk" ]; then disk="$(${pkgs.coreutils}/bin/realpath "$disk")"; fi
+    if [ -z "$disk" ] || [ ! -b "$disk" ] \
+       || [ "$(${pkgs.util-linux}/bin/lsblk -dno TYPE "$disk" 2>/dev/null)" != disk ]; then
+      echo "usage: install-keepnode /dev/DISK   (a whole disk, not a partition)"
       echo
-      ${pkgs.util-linux}/bin/lsblk -do NAME,SIZE,TYPE,MODEL
+      ${pkgs.util-linux}/bin/lsblk -do NAME,SIZE,TYPE,MODEL,SERIAL
       exit 1
     fi
 
     echo "This will ERASE everything on $disk:"
-    ${pkgs.util-linux}/bin/lsblk "$disk"
+    ${pkgs.util-linux}/bin/lsblk -o NAME,SIZE,TYPE,MODEL,SERIAL "$disk"
     read -rp "Type YES to wipe it and install keepnode: " confirm
     [ "$confirm" = "YES" ] || { echo "Aborted."; exit 1; }
+
+    # Make re-runs in the same boot safe: release anything left mounted by a prior failed run.
+    umount -R /mnt 2>/dev/null || true
+    swapoff -a 2>/dev/null || true
 
     ${pkgs.util-linux}/bin/wipefs -a "$disk"
     ${pkgs.gptfdisk}/bin/sgdisk --zap-all "$disk"
@@ -46,10 +54,12 @@ let
     ${pkgs.e2fsprogs}/bin/mkfs.ext4 -F -L nixos "$p2"
     ${pkgs.systemd}/bin/udevadm settle
 
-    # Mount by label, not device node: robust against a not-yet-resettled partition table.
-    mount /dev/disk/by-label/nixos /mnt
+    # Mount the partitions we just created by their device node. The udevadm settle above makes
+    # this safe from the re-read race; mounting by label could resolve to another disk that
+    # happens to share the "nixos"/"ESP" label.
+    mount "$p2" /mnt
     mkdir -p /mnt/boot
-    mount /dev/disk/by-label/ESP /mnt/boot
+    mount "$p1" /mnt/boot
 
     # --system installs the pre-built, embedded closure: no eval, no network, no rebuild.
     nixos-install --system ${keepnodeToplevel} --no-root-password --no-channel-copy

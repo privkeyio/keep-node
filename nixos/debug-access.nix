@@ -12,8 +12,7 @@ let
   cfg = config.keepNode.debugAccess;
 in
 {
-  options.keepNode.debugAccess.enable =
-    lib.mkEnableOption "insecure test access: SSH, console autologin, LAN web UI over self-signed TLS";
+  options.keepNode.debugAccess.enable = lib.mkEnableOption "insecure test access: SSH, console autologin, LAN web UI over self-signed TLS";
 
   config = lib.mkIf cfg.enable {
     # Console autologin + a known password so you can also SSH in. CHANGE THIS after first boot.
@@ -40,8 +39,11 @@ in
       };
       path = [ pkgs.openssl ];
       script = ''
+        set -euo pipefail
         d=/var/lib/keepnode-tls
-        if [ ! -f "$d/key.pem" ]; then
+        # Regenerate unless BOTH files are present: an interrupted first run can leave the key
+        # without the cert, and nginx would then fail forever on the missing/half-written pair.
+        if [ ! -f "$d/key.pem" ] || [ ! -f "$d/cert.pem" ]; then
           mkdir -p "$d"
           openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
             -subj "/CN=keepnode" -addext "subjectAltName=DNS:keepnode" \
