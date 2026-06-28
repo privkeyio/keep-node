@@ -111,14 +111,12 @@
         f"--tpm-tcti device:/dev/tpmrm0 --insecure-no-attestation",
     )
     box.wait_until_succeeds("systemctl is-active box-announce.service", timeout=30)
-    # The box's first TPM quote (swtpm) and its announce can take a while on a loaded CI runner.
-    # The box re-announces in the background and the relay replays stored announces to a new
-    # subscriber, so retry the capture until an attested announce has landed rather than betting
-    # on one fixed window. The capture is read-only (collect events, write policy.toml), so the
-    # retry is safe.
+    # Announces are ephemeral, so attestation-provision holds a live subscription and listens for
+    # the full --wait; the box re-announces every 20s, so a window over one interval deterministically
+    # catches one. The outer retry only covers the box still warming up its first TPM quote.
     holder.wait_until_succeeds(
         f"{env} {keep} --no-mlock --path /root/holder frost network attestation-provision "
-        f"--group {npub} --relay {relay_url} --out /root/policy.toml --wait 20",
+        f"--group {npub} --relay {relay_url} --out /root/policy.toml --wait 40",
         timeout=180,
     )
     holder.succeed("test -s /root/policy.toml")
