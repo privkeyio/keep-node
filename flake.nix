@@ -125,11 +125,43 @@
           7
           24
         ]).success; # partially-bad list is rejected
+
+      # The appliance, as it lands on real hardware: UEFI, Vaultwarden on, keep-web and
+      # frost-gate off (frost-gate TPM unlock is opt-in and added later), plus the opt-in
+      # debug-access module (console autologin, SSH, LAN web UI over self-signed TLS).
+      keepnodeSystem = nixpkgs.lib.nixosSystem {
+        inherit system;
+        modules = [
+          ./nixos/keep-node.nix
+          ./nixos/appliance.nix
+          ./nixos/debug-access.nix
+        ];
+      };
+
+      # A self-contained UEFI installer ISO. It embeds the full appliance closure (see
+      # installer.nix) so `install-keepnode /dev/DISK` wipes the target and installs offline.
+      installerSystem = nixpkgs.lib.nixosSystem {
+        inherit system;
+        specialArgs = {
+          keepnodeToplevel = keepnodeSystem.config.system.build.toplevel;
+        };
+        modules = [
+          (nixpkgs + "/nixos/modules/installer/cd-dvd/installation-cd-minimal.nix")
+          ./nixos/installer.nix
+        ];
+      };
     in
     {
       packages.${system} = {
         inherit keep-web keep-cli;
         default = keep-web;
+        # `nix build .#installer-iso` -> result/iso/*.iso ; dd it to a USB stick.
+        installer-iso = installerSystem.config.system.build.isoImage;
+      };
+
+      nixosConfigurations = {
+        keepnode = keepnodeSystem;
+        installer = installerSystem;
       };
 
       # The test suite. The tests boot real NixOS VMs (no hardware needed) and are the
