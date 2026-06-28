@@ -1,7 +1,7 @@
 # STUB: two KeepNodes sync; kill one, the other keeps serving (multi-node HA).
 #
 # Fill in once the sync layer lands:
-#   * transport: nvpn mesh between nodeA and nodeB (see SPIKE-nostr-vpn.md)
+#   * transport: nostr-vpn mesh between nodeA and nodeB
 #   * replication: active/standby of Vaultwarden's SQLite + attachments; Keep state via wisp
 #     NIP-77 negentropy
 #   * failover: promote standby on primary loss
