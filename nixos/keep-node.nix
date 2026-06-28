@@ -5,9 +5,6 @@
 # boots end-to-end in a VM with no hardware. keep-web is a real built package (see flake.nix),
 # off by default here but enabled by the single-node test; the frost-gate is opt-in and
 # enabled by its own test. These get wired into the default composition as the build matures.
-#
-# See the design docs (kept outside this repo): KEEP-NODE.md, BUILD-PLAN.md,
-# SPIKE-vaultwarden-unlock.md (Approach B).
 { lib, ... }:
 {
   imports = [

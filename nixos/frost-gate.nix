@@ -1,4 +1,4 @@
-# FROST threshold volume gate (Approach B).
+# FROST threshold volume gate.
 #
 # v1 (this module): Vaultwarden's data dir lives on a LUKS volume whose key is sealed to the
 # TPM (released by measured boot). A single gate service provisions the volume on first boot
@@ -315,7 +315,7 @@ let
 in
 {
   options.keepNode.frostGate = {
-    enable = lib.mkEnableOption "FROST-gated LUKS volume for Vaultwarden data (Approach B, v1: TPM-sealed)";
+    enable = lib.mkEnableOption "FROST-gated LUKS volume for Vaultwarden data (v1: TPM-sealed)";
 
     mode = lib.mkOption {
       type = lib.types.enum [

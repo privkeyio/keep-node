@@ -1,4 +1,4 @@
-# Vaultwarden, threshold-gated per Approach B (see SPIKE-vaultwarden-unlock.md).
+# Vaultwarden, its data volume threshold-gated by the FROST volume gate.
 #
 # Vaultwarden is zero-knowledge end-to-end: the server only ever holds the *encrypted* user
 # key plus an auth hash, so it cannot decrypt a vault. We therefore do NOT modify Vaultwarden
@@ -17,7 +17,7 @@ let
 in
 {
   options.keepNode.vaultwarden = {
-    enable = lib.mkEnableOption "Vaultwarden (threshold-gated, Approach B)";
+    enable = lib.mkEnableOption "Vaultwarden (data volume threshold-gated)";
     port = lib.mkOption {
       type = lib.types.port;
       default = 8222;
