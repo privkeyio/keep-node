@@ -110,10 +110,16 @@
         f"--path /root/box frost network serve --group {npub} --relay {relay_url} "
         f"--tpm-tcti device:/dev/tpmrm0 --insecure-no-attestation",
     )
-    holder.sleep(10)  # let the box's startup quote complete and its announce land
-    holder.succeed(
+    box.wait_until_succeeds("systemctl is-active box-announce.service", timeout=30)
+    # The box's first TPM quote (swtpm) and its announce can take a while on a loaded CI runner.
+    # The box re-announces in the background and the relay replays stored announces to a new
+    # subscriber, so retry the capture until an attested announce has landed rather than betting
+    # on one fixed window. The capture is read-only (collect events, write policy.toml), so the
+    # retry is safe.
+    holder.wait_until_succeeds(
         f"{env} {keep} --no-mlock --path /root/holder frost network attestation-provision "
-        f"--group {npub} --relay {relay_url} --out /root/policy.toml --wait 20"
+        f"--group {npub} --relay {relay_url} --out /root/policy.toml --wait 20",
+        timeout=180,
     )
     holder.succeed("test -s /root/policy.toml")
     # Stop the bootstrap announcer so it does not share the box's identity with
@@ -128,7 +134,8 @@
         f"--oprf-share-file /root/holder-oprf.share --oprf-dealer 1 "
         f"--attestation-config /root/policy.toml",
     )
-    holder.sleep(5)
+    holder.wait_until_succeeds("systemctl is-active holder-serve.service", timeout=30)
+    holder.sleep(15)  # let the holder connect to the relay and subscribe before the box deals
 
     # --- 4. Box provisions the OPRF quorum (deals share 2 to the online holder). ---
     box.succeed(
@@ -137,7 +144,7 @@
         f"--key-out /root/luks.key --share-out /root/box-oprf.share --tpm-tcti device:/dev/tpmrm0"
     )
     box.succeed("test -s /root/luks.key")
-    holder.wait_until_succeeds("test -s /root/holder-oprf.share", timeout=30)
+    holder.wait_until_succeeds("test -s /root/holder-oprf.share", timeout=60)
 
     # The holder must restart to LOAD its newly sealed share (it takes effect on
     # the next start); only then can it answer evaluations.
@@ -149,15 +156,21 @@
         f"--oprf-share-file /root/holder-oprf.share --oprf-dealer 1 "
         f"--attestation-config /root/policy.toml",
     )
-    holder.sleep(5)
+    holder.wait_until_succeeds("systemctl is-active holder-serve2.service", timeout=30)
+    holder.sleep(15)  # let holder-serve2 load the sealed share and re-subscribe
 
     # --- 5. Box requests a 2-of-3 unlock; the reconstructed key must match. ---
-    unlocked = box.succeed(
+    # holder-serve2 may need a moment before it answers evaluations; the unlock is a read-only
+    # reconstruction, so retry it until it yields the key, writing to a file we read back
+    # (wait_until_succeeds discards stdout).
+    box.wait_until_succeeds(
         f"{env} {keep} --no-mlock --path /root/box frost network oprf-unlock "
         f"--group {npub} --relay {relay_url} --volume-id vault0 "
         f"--share-file /root/box-oprf.share --tpm-tcti device:/dev/tpmrm0 "
-        f"| xxd -p | tr -d '\\n'"
-    ).strip()
+        f"> /root/unlocked.bin",
+        timeout=120,
+    )
+    unlocked = box.succeed("xxd -p /root/unlocked.bin | tr -d '\\n'").strip()
     provisioned = box.succeed("xxd -p /root/luks.key | tr -d '\\n'").strip()
     assert len(provisioned) == 64, f"expected a 32-byte LUKS key, got {provisioned!r}"
     assert unlocked == provisioned, f"unlock key {unlocked!r} != provisioned {provisioned!r}"
