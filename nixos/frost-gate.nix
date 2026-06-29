@@ -185,11 +185,13 @@ let
         # secret at rest; this exists so a single-node deploy can survive a PCR change before
         # replica recovery (M1) lands.
         rkfile=${lib.escapeShellArg cfg.recoveryKeyFile}
-        # Create the parent dir if absent WITHOUT forcing a mode on an existing one: `install -d
-        # -m 0700` would re-chmod a shared dir (even /etc or /) to 0700 and break the system. The
-        # key's protection comes from the explicit 0600 on the FILE, set before the secret lands
-        # (umask alone only covers a freshly created file; an overwrite would keep a looser mode).
-        mkdir -p "$(dirname "$rkfile")"
+        # Create the parent dir if absent. `mkdir -p -m 0700` tightens only a freshly created leaf,
+        # never re-chmodding an existing (possibly shared) parent the way `install -d -m 0700` would
+        # (that would re-chmod a shared dir, even /etc or /, to 0700 and break the system). The key's
+        # protection comes from the explicit 0600 on the FILE, set before the secret lands (umask
+        # alone only covers a freshly created file; an overwrite would keep a looser mode); the 0700
+        # leaf is defense-in-depth for this plaintext key, matching the OPRF cred block below.
+        mkdir -p -m 0700 "$(dirname "$rkfile")"
         rk="$(PASSWORD="$pass" systemd-cryptenroll --recovery-key "$dev")"
         ( umask 077; : > "$rkfile" )
         chmod 0600 "$rkfile"
