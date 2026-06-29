@@ -17,12 +17,13 @@
 #     cannot release the key).
 #   * Bound to PCR 7 only: PCR 7 binding is weak until real measured boot exists. The proper
 #     measured-boot PCR policy lands with the Lanzaboote work, not here.
-#   * No local recovery keyslot: the random bootstrap passphrase is discarded after enrollment
-#     on purpose. Writing a LUKS-unlocking recovery key to the (unencrypted) root would gut the
-#     "steal the box, get nothing" premise. Recovery is the node replicas (other nodes hold the
-#     data) and the v2 FROST quorum (the phone share), never a local secret at rest. The cost:
+#   * No local recovery keyslot by default: the random bootstrap passphrase is discarded after
+#     enrollment on purpose. Writing a LUKS-unlocking recovery key to the (unencrypted) root would
+#     gut the "steal the box, get nothing" premise. Recovery is the node replicas (other nodes hold
+#     the data) and the v2 FROST quorum (the phone share), never a local secret at rest. The cost:
 #     a PCR 7 change (firmware/Secure Boot/board swap) makes this node's volume unreadable until
-#     re-provisioned from a replica. Fail-closed by design.
+#     re-provisioned from a replica. Fail-closed by design. (The opt-in `recoveryKeyFile` option
+#     deliberately relaxes this for a single-node deploy with no replica yet; see that option.)
 #
 # Vaultwarden hard-requires the mount, so if the volume cannot be unlocked the password
 # manager does not start.
@@ -38,7 +39,7 @@ let
   systemdCryptsetup = "${pkgs.systemd}/lib/systemd/systemd-cryptsetup";
 
   # The systemd .device unit for the backing volume (empty when unset). The gate orders after
-  # and binds to it so the probe never races a device that has not yet appeared/settled.
+  # and requires it so the probe never races a device that has not yet appeared/settled.
   deviceUnits = lib.optionals (cfg.volumeDevice != null) [
     "${utils.escapeSystemdPath cfg.volumeDevice}.device"
   ];
@@ -182,11 +183,18 @@ let
         # TPM, so MOVE IT OFFLINE and delete the on-disk copy. Default (null) keeps no local
         # secret at rest; this exists so a single-node deploy can survive a PCR change before
         # replica recovery (M1) lands.
-        install -d -m 0700 "$(dirname ${lib.escapeShellArg cfg.recoveryKeyFile})"
+        rkfile=${lib.escapeShellArg cfg.recoveryKeyFile}
+        # Create the parent dir if absent WITHOUT forcing a mode on an existing one: `install -d
+        # -m 0700` would re-chmod a shared dir (even /etc or /) to 0700 and break the system. The
+        # key's protection comes from the explicit 0600 on the FILE, set before the secret lands
+        # (umask alone only covers a freshly created file; an overwrite would keep a looser mode).
+        mkdir -p "$(dirname "$rkfile")"
         rk="$(PASSWORD="$pass" systemd-cryptenroll --recovery-key "$dev")"
-        ( umask 077; printf '%s\n' "$rk" > ${lib.escapeShellArg cfg.recoveryKeyFile} )
+        ( umask 077; : > "$rkfile" )
+        chmod 0600 "$rkfile"
+        printf '%s\n' "$rk" > "$rkfile"
         unset rk
-        echo "frost-gate: wrote a LUKS recovery key to ${cfg.recoveryKeyFile} (0600). MOVE IT OFFLINE and delete the on-disk copy; it unlocks the vault without the TPM." >&2
+        echo "frost-gate: wrote a LUKS recovery key to $rkfile (0600). MOVE IT OFFLINE and delete the on-disk copy; it unlocks the vault without the TPM." >&2
       ''}
       # Enroll the TPM2 token and drop the bootstrap passphrase slot in one authenticated
       # step: PASSWORD unlocks for the enrollment, then the password slot is wiped, leaving
@@ -229,6 +237,14 @@ let
           echo "frost-gate: $dev was provisioned but its TPM2 token is gone; refusing to reformat. Recover from a replica or with the recovery key." >&2
           exit 1
         fi
+      elif grep -q keep-node-oprf <<<"$dump"; then
+        # Our label, no keep-node-provisioned marker, but the OPRF subsystem marker IS set: this is
+        # an OPRF-provisioned volume (mode = "oprf") carrying real data under an OPRF-derived
+        # keyslot this tpm-mode gate cannot reformat without destroying it. A mode switch from
+        # "oprf" to "tpm" on an existing volume must fail closed, NOT fall through to the reclaim
+        # wipe below. (oprfProvisionScript guards the reverse case symmetrically.)
+        echo "frost-gate: $dev is OPRF-provisioned (mode=\"oprf\") but this gate is mode=\"tpm\"; refusing to reformat. Recover from a replica or set mode = \"oprf\"." >&2
+        exit 1
       else
         # Our label but NO completion marker: a first-boot provision was interrupted before mkfs
         # (e.g. power loss), possibly AFTER the TPM2 token was enrolled. The marker is the sole
@@ -529,6 +545,10 @@ in
         message = "keepNode.frostGate.quorum: need 1 <= threshold <= total.";
       }
       {
+        assertion = cfg.recoveryKeyFile == null || cfg.mode == "tpm";
+        message = "keepNode.frostGate.recoveryKeyFile is only honored in mode = \"tpm\" (it enrolls a LUKS recovery keyslot during first-boot provisioning); in mode = \"oprf\" it is silently ignored.";
+      }
+      {
         assertion = cfg.mode != "oprf" || cfg.quorum.threshold >= 2;
         message = "keepNode.frostGate.mode = \"oprf\" requires quorum.threshold >= 2 (threshold=1 collapses the threshold model).";
       }
@@ -557,11 +577,14 @@ in
         else
           "Unseal the FROST-gated vault volume (provision + TPM2 unlock)";
       wantedBy = [ "multi-user.target" ];
-      # Order after (and bind to) the backing device unit so the wrong-device probe never races a
+      # Order after and require the backing device unit so the wrong-device probe never races a
       # device that has not yet appeared/settled: a not-yet-present device probes as blank, which
-      # would otherwise reformat a real but late-arriving volume. Empty when volumeDevice is unset.
+      # would otherwise reformat a real but late-arriving volume. `requires` (not `bindsTo`): the
+      # start-ordering is all the race needs, and bindsTo would let a later spurious udev re-trigger
+      # of the device unit tear the gate (and, via its requires, vaultwarden) down on an
+      # otherwise-healthy unattended node. Empty when volumeDevice is unset.
       after = deviceUnits;
-      bindsTo = deviceUnits;
+      requires = deviceUnits;
       # Shared base; oprf adds the keep CLI (quorum unlock), tpm adds e2fsprogs (first-boot mkfs).
       path = [
         pkgs.cryptsetup

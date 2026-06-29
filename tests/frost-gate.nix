@@ -90,6 +90,37 @@
     node.wait_for_open_port(8222)
     node.succeed("curl -fsS http://localhost:8222/alive")
 
+    # Reclaim branch (the headline data-loss fix): label present, completion marker ABSENT, but the
+    # TPM2 token still PRESENT. The marker is the sole authority that a filesystem exists, so its
+    # absence means a first provision interrupted before mkfs (no data) even with a token already
+    # enrolled. The gate must RECLAIM (wipe + reprovision from blank), NOT take the token-first
+    # unlock path and then fail to mount an empty volume on every boot (the pre-fix brick). Strip
+    # ONLY the subsystem marker (re-set the label in the same call, as provisioning does) while
+    # leaving the token, then reboot.
+    node.succeed("cryptsetup luksDump /dev/vdb | grep -q keep-node-provisioned")  # marker present
+    node.succeed('cryptsetup config /dev/vdb --label keep-node-frost-gate --subsystem ""')
+    node.succeed("! cryptsetup luksDump /dev/vdb | grep -q keep-node-provisioned")  # marker gone
+    node.succeed("systemd-cryptenroll /dev/vdb | grep -q tpm2")  # token deliberately left enrolled
+
+    node.shutdown()
+    node.start()
+    # Reclaimed, not bricked: the gate comes back up, the volume is freshly provisioned (marker
+    # re-set, a new TPM2 token), and the stale canary is GONE (the device was reformatted, proving
+    # the reclaim path ran rather than attach-an-empty-volume-then-fail-to-mount).
+    node.wait_for_unit("keep-node-frost-gate.service")
+    node.succeed("test -e /dev/mapper/keep-vault")
+    node.succeed("cryptsetup luksDump /dev/vdb | grep -q keep-node-provisioned")
+    node.succeed("systemd-cryptenroll /dev/vdb | grep -q tpm2")
+    node.wait_for_unit("vaultwarden.service")
+    # Assert the stale canary is gone against the MOUNTED reclaimed volume. Confirm the mapper is
+    # mounted first: otherwise an unmounted dataDir would read the (empty) underlying root dir and
+    # the check would pass spuriously, masking the very brick regression this test guards.
+    node.succeed("findmnt -n -o SOURCE /var/lib/vaultwarden | grep -q '/dev/mapper/keep-vault'")
+    node.fail("test -e /var/lib/vaultwarden/canary")  # reformatted: stale data gone
+
+    # Re-seed the canary so the fail-closed test below operates on a provisioned, data-bearing volume.
+    node.succeed("echo keep-node-canary > /var/lib/vaultwarden/canary")
+
     # Losing the TPM2 token on a PROVISIONED volume must FAIL CLOSED, never auto-wipe. Removing
     # the systemd-tpm2 token leaves the volume with no usable keyslot, so its data (the canary
     # above) is unrecoverable on-box. Per the fail-closed design (header: recover from a replica,
