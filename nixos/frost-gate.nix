@@ -115,6 +115,7 @@ let
               ${cfg.keepPackage}/bin/keep --path ${lib.escapeShellArg cfg.keepDbPath} frost network oprf-unlock \
                 --group ${lib.escapeShellArg cfg.group} --relay ${lib.escapeShellArg cfg.relay} --share ${toString cfg.shareIndex} \
                 --volume-id ${lib.escapeShellArg cfg.volumeId} --epoch ${toString cfg.epoch} \
+                --tpm-tcti ${lib.escapeShellArg cfg.tpmTcti} \
                 --share-file "$CREDENTIALS_DIRECTORY/oprf-share" \
                 > "$keyf" )
           cryptsetup open --key-file "$keyf" --keyfile-size 32 "$dev" "$mapper"
@@ -352,6 +353,7 @@ let
         --group ${lib.escapeShellArg cfg.group} --relay ${lib.escapeShellArg cfg.relay} --share ${toString cfg.shareIndex} \
         --volume-id ${lib.escapeShellArg cfg.volumeId} --epoch ${toString cfg.epoch} \
         --threshold ${toString cfg.quorum.threshold} --total ${toString cfg.quorum.total} \
+        --tpm-tcti ${lib.escapeShellArg cfg.tpmTcti} \
         --key-out "$keyfile" --share-out "$sharefile"
 
     # 2. Lay down the LUKS volume keyed by the OPRF-derived 32-byte LUKS key, open it, mkfs. Do
@@ -488,6 +490,18 @@ in
       description = "This box's FROST share index (the local u16 share id) used in the OPRF quorum.";
     };
 
+    tpmTcti = lib.mkOption {
+      type = lib.types.str;
+      default = "device:/dev/tpmrm0";
+      description = ''
+        TCTI for this box's TPM, passed as --tpm-tcti to oprf-provision and oprf-unlock so the box
+        attaches a measured-boot quote to its requests. Required for mode = "oprf": holders gate
+        enrollment and evaluation on a VERIFIED dealer, so a box that does not attest is refused
+        and the boot unlock fails closed. The boot-time gate and the provision unit must also have
+        access to this TPM device (see the runbook on keep-node-frost-provision).
+      '';
+    };
+
     volumeId = lib.mkOption {
       type = lib.types.str;
       default = "vault0";
@@ -565,6 +579,17 @@ in
           );
         message = "keepNode.frostGate.mode = \"oprf\" requires keepPackage, group, relay, keepDbPath, keepPasswordCred, and oprfShareCred.";
       }
+      {
+        assertion =
+          cfg.mode != "oprf"
+          || (
+            cfg.tpmTcti != ""
+            && !(lib.hasInfix "mssim" cfg.tpmTcti)
+            && !(lib.hasInfix "swtpm" cfg.tpmTcti)
+            && !(lib.hasInfix "libtpms" cfg.tpmTcti)
+          );
+        message = "keepNode.frostGate.tpmTcti must be a hardware TPM TCTI in mode = \"oprf\" (a software/emulator TCTI such as mssim/swtpm/libtpms makes the measured-boot attestation fail open).";
+      }
     ];
 
     # The gate. mode = "tpm" (v1): provision on first boot, TPM2-unlock every boot. mode = "oprf"
@@ -623,6 +648,13 @@ in
     # KEEP_PASSWORD in its environment and the OPRF holders (phone + replica) online; it
     # distributes the OPRF key, formats the volume, and seals this box's share + the keep DB
     # password to the TPM.
+    #
+    # The box attests during provisioning AND every boot unlock: both call keep with
+    # `--tpm-tcti ${cfg.tpmTcti}` so holders can verify this dealer (they refuse an unattested
+    # one). That requires the keep-cli build to include the `tpm-attestation` feature and both
+    # this unit and the boot-time keep-node-frost-gate unit to have access to the TPM device
+    # (e.g. /dev/tpmrm0). Neither unit sandboxes devices, so a default root oneshot already has
+    # access; if you add device sandboxing, allow the TPM (e.g. DeviceAllow=/dev/tpmrm0 rw).
     #
     # Delivering KEEP_PASSWORD (a plain `systemctl start` runs in a clean env, so the password
     # must be injected): set `keepPasswordEnvFile` to a 0400 EnvironmentFile (KEEP_PASSWORD=...)
