@@ -184,6 +184,7 @@
     node.wait_until_succeeds("systemctl is-failed --quiet keep-node-frost-gate.service")
     node.succeed("journalctl -b -u keep-node-frost-gate.service | grep -q 'OPRF-provisioned'")
     node.fail("test -e /dev/mapper/keep-vault")  # not unlocked, not wiped
+    node.fail("systemctl is-active --quiet vaultwarden.service")  # hard dep held: stays down
     # The oprf volume survived untouched: still LUKS, our label, the keep-node-oprf marker intact.
     node.succeed("cryptsetup isLuks /dev/vdb")
     node.succeed("cryptsetup luksDump /dev/vdb | grep -q keep-node-frost-gate")
@@ -193,16 +194,16 @@
     recovery.start()
     recovery.wait_for_unit("keep-node-frost-gate.service")
     recovery.succeed("cryptsetup isLuks /dev/vdb")
-    # The recovery key file was written, owner-only (0600).
+    # The recovery key file was written, root-owned and owner-only (0600).
     recovery.succeed("test -f /var/lib/keep-node/recovery.key")
+    recovery.succeed('test "$(stat -c %U /var/lib/keep-node/recovery.key)" = root')
     recovery.succeed('test "$(stat -c %a /var/lib/keep-node/recovery.key)" = 600')
-    # It actually unlocks the volume INDEPENDENTLY of the TPM: the enrolled recovery passphrase
-    # (fed without its trailing newline) opens a keyslot. --test-passphrase checks it without
-    # activating a mapper. This is the escape hatch a PCR change would otherwise leave no path to.
-    recovery.succeed(
-        "printf '%s' \"$(cat /var/lib/keep-node/recovery.key)\" "
-        "| cryptsetup luksOpen --test-passphrase -d - /dev/vdb"
-    )
+    # It actually unlocks the volume INDEPENDENTLY of the TPM, fed exactly as the operator would use
+    # it: the file passed straight to `cryptsetup -d <file>` (cryptsetup reads the whole file as the
+    # passphrase, so the stored bytes must carry NO trailing newline). --test-passphrase checks the
+    # keyslot without activating a mapper. This is the escape hatch a PCR change would otherwise
+    # leave no path to.
+    recovery.succeed("cryptsetup luksOpen --test-passphrase -d /var/lib/keep-node/recovery.key /dev/vdb")
     # The TPM2 token is still the primary keyslot; the recovery slot is additive, not a replacement.
     recovery.succeed("systemd-cryptenroll /dev/vdb | grep -q tpm2")
 

@@ -195,7 +195,10 @@ let
         rk="$(PASSWORD="$pass" systemd-cryptenroll --recovery-key "$dev")"
         ( umask 077; : > "$rkfile" )
         chmod 0600 "$rkfile"
-        printf '%s\n' "$rk" > "$rkfile"
+        # No trailing newline: the file must be usable verbatim as `cryptsetup luksOpen -d "$rkfile"`,
+        # which reads the entire file as the passphrase. A trailing \n would be taken as key material,
+        # corrupting it and leaving the escape hatch unopenable.
+        printf '%s' "$rk" > "$rkfile"
         unset rk
         echo "frost-gate: wrote a LUKS recovery key to $rkfile (0600). MOVE IT OFFLINE and delete the on-disk copy; it unlocks the vault without the TPM." >&2
       ''}
