@@ -3,11 +3,11 @@
     "keep": {
       "flake": false,
       "locked": {
-        "lastModified": 1782672469,
-        "narHash": "sha256-4g0dg9XCuP2Y8c4eUxyHmBhJuM2Pag4+Ihhp7Soa7Xg=",
+        "lastModified": 1782737645,
+        "narHash": "sha256-iMv90IN1piDBpiLEs4Cy+Kvs+sWNcNgV52qUyfN4NHs=",
         "owner": "privkeyio",
         "repo": "keep",
-        "rev": "ee4d015cdabdaf572fa21abd6db5d93aa1b5fe68",
+        "rev": "0ce5290443b91cab8b9f5dd974ab5daf88beab2c",
         "type": "github"
       },
       "original": {

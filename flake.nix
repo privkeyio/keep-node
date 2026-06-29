@@ -95,6 +95,10 @@
         frost-gate = pkgs.testers.runNixOSTest {
           imports = [ ./tests/frost-gate.nix ];
         };
+        oprf-unlock = pkgs.testers.runNixOSTest {
+          imports = [ ./tests/oprf-unlock.nix ];
+          _module.args.keepCliPackage = keep-cli;
+        };
         formatting = treefmtEval.config.build.check self;
         # ha-failover = pkgs.testers.runNixOSTest { imports = [ ./tests/ha-failover.nix ]; };  # stub
       };
