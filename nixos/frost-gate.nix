@@ -54,10 +54,13 @@ let
   # the host. What does lock down cheaply without breaking dm-crypt or the mount: no privilege
   # escalation, no realtime/SUID/namespace surprises, and the socket families: tpm mode contacts no
   # network at all; oprf mode additionally reaches the relay (the one path the attestation change
-  # widened), so AF_INET[6] is added only there.
+  # widened), so AF_INET[6] is added only there. ProtectClock is deliberately NOT set: it implicitly
+  # appends DeviceAllow=char-rtc, which under the default DevicePolicy=auto flips device access to
+  # closed and would block the raw disk, /dev/mapper, and TPM these units must touch. AF_ALG stays in
+  # the family list so cryptsetup keeps working if its backend talks to the kernel crypto API (a local
+  # socket, never the network).
   hardening = {
     NoNewPrivileges = true;
-    ProtectClock = true;
     ProtectHostname = true;
     RestrictRealtime = true;
     RestrictSUIDSGID = true;
@@ -66,6 +69,7 @@ let
     RestrictAddressFamilies = [
       "AF_UNIX"
       "AF_NETLINK"
+      "AF_ALG"
     ]
     ++ lib.optionals (cfg.mode == "oprf") [
       "AF_INET"
