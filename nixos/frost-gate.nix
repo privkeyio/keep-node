@@ -365,8 +365,11 @@ let
 
     # 3. Seal this box's OPRF share and the keep DB password to the TPM (PCR 7). At boot systemd
     #    re-decrypts these into the gate unit's $CREDENTIALS_DIRECTORY; a PCR change fails closed.
-    install -d -m 0700 "$(dirname "$shareCred")"
-    install -d -m 0700 "$(dirname "$passCred")"
+    #    `mkdir -p -m 0700` applies the mode only to a freshly created leaf, so it never re-chmods
+    #    an existing (possibly shared) parent the way `install -d -m 0700` would; the sealed cred
+    #    files themselves are written 0600 by systemd-creds regardless.
+    mkdir -p -m 0700 "$(dirname "$shareCred")"
+    mkdir -p -m 0700 "$(dirname "$passCred")"
     systemd-creds encrypt --with-key=tpm2 --tpm2-pcrs=7 --name=oprf-share "$sharefile" "$shareCred"
     printf '%s' "$KEEP_PASSWORD" \
       | systemd-creds encrypt --with-key=tpm2 --tpm2-pcrs=7 --name=keep-password - "$passCred"
