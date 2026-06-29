@@ -33,8 +33,11 @@
       networking.firewall.allowedTCPPorts = [ 7777 ];
     };
 
+  # keep-cli's relay-URL guard rejects single-label hosts as internal (SSRF protection) with no
+  # runtime opt-out, so the box/holder reach the relay by a dotted name that passes validation.
+  # ws:// skips cert-pinning's resolved-IP check, so the private VM address it resolves to is fine.
   nodes.box =
-    { pkgs, ... }:
+    { pkgs, nodes, ... }:
     {
       environment.systemPackages = [
         keepCliPackage
@@ -42,13 +45,15 @@
       ];
       virtualisation.tpm.enable = true; # swtpm -> /dev/tpmrm0
       networking.firewall.enable = false;
+      networking.extraHosts = "${nodes.relay.networking.primaryIPAddress} relay.kfp";
     };
 
   nodes.holder =
-    { ... }:
+    { nodes, ... }:
     {
       environment.systemPackages = [ keepCliPackage ];
       networking.firewall.enable = false;
+      networking.extraHosts = "${nodes.relay.networking.primaryIPAddress} relay.kfp";
     };
 
   testScript = ''
@@ -60,7 +65,7 @@
         return m.group(0)
 
     keep = "${keepCliPackage}/bin/keep"
-    relay_url = "ws://relay:7777"
+    relay_url = "ws://relay.kfp:7777"
     # KEEP_YES skips confirmations; --no-mlock avoids RLIMIT_MEMLOCK failures in the
     # VM; KEEP_ALLOW_WS allows the plain-ws:// test relay (no TLS in the VM).
     env = "KEEP_PASSWORD=testpassword123 KEEP_YES=1 KEEP_ALLOW_WS=1"
