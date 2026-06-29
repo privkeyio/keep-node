@@ -170,6 +170,15 @@
     oprf.succeed(
         "systemctl cat keep-node-frost-gate.service | grep -q 'LoadCredentialEncrypted=oprf-share:'"
     )
+    # ...and the boot unlock renders the hardware-attestation flag into the unlock invocation. The
+    # flag lives in the ExecStart script (not the unit body), so resolve the script path and grep
+    # it: a renamed option or dropped interpolation would silently strip attestation and otherwise
+    # pass CI (the fail-closed paths above never reach the stubbed `keep`).
+    gate_script = oprf.succeed(
+        "systemctl show -p ExecStart --value keep-node-frost-gate.service "
+        "| grep -oE '/nix/store/[^ ;]*unit-script-keep-node-frost-gate-start[^ ;]*' | head -n1"
+    ).strip()
+    oprf.succeed(f"grep -q -- '--tpm-tcti device:/dev/tpmrm0' {gate_script}")
     # ...and the boot unlock is time-bounded (a hung relay can't stall boot forever).
     oprf.succeed(
         'test "$(systemctl show -p TimeoutStartUSec --value keep-node-frost-gate.service)" != infinity'

@@ -579,6 +579,17 @@ in
           );
         message = "keepNode.frostGate.mode = \"oprf\" requires keepPackage, group, relay, keepDbPath, keepPasswordCred, and oprfShareCred.";
       }
+      {
+        assertion =
+          cfg.mode != "oprf"
+          || (
+            cfg.tpmTcti != ""
+            && !(lib.hasInfix "mssim" cfg.tpmTcti)
+            && !(lib.hasInfix "swtpm" cfg.tpmTcti)
+            && !(lib.hasInfix "libtpms" cfg.tpmTcti)
+          );
+        message = "keepNode.frostGate.tpmTcti must be a hardware TPM TCTI in mode = \"oprf\" (a software/emulator TCTI such as mssim/swtpm/libtpms makes the measured-boot attestation fail open).";
+      }
     ];
 
     # The gate. mode = "tpm" (v1): provision on first boot, TPM2-unlock every boot. mode = "oprf"
