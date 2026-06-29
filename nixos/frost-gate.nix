@@ -185,11 +185,13 @@ let
         # secret at rest; this exists so a single-node deploy can survive a PCR change before
         # replica recovery (M1) lands.
         rkfile=${lib.escapeShellArg cfg.recoveryKeyFile}
-        # Create the parent dir if absent WITHOUT forcing a mode on an existing one: `install -d
-        # -m 0700` would re-chmod a shared dir (even /etc or /) to 0700 and break the system. The
-        # key's protection comes from the explicit 0600 on the FILE, set before the secret lands
-        # (umask alone only covers a freshly created file; an overwrite would keep a looser mode).
-        mkdir -p "$(dirname "$rkfile")"
+        # Create the parent dir if absent. `mkdir -p -m 0700` tightens only a freshly created leaf,
+        # never re-chmodding an existing (possibly shared) parent the way `install -d -m 0700` would
+        # (that would re-chmod a shared dir, even /etc or /, to 0700 and break the system). The key's
+        # protection comes from the explicit 0600 on the FILE, set before the secret lands (umask
+        # alone only covers a freshly created file; an overwrite would keep a looser mode); the 0700
+        # leaf is defense-in-depth for this plaintext key, matching the OPRF cred block below.
+        mkdir -p -m 0700 "$(dirname "$rkfile")"
         rk="$(PASSWORD="$pass" systemd-cryptenroll --recovery-key "$dev")"
         ( umask 077; : > "$rkfile" )
         chmod 0600 "$rkfile"
@@ -365,8 +367,11 @@ let
 
     # 3. Seal this box's OPRF share and the keep DB password to the TPM (PCR 7). At boot systemd
     #    re-decrypts these into the gate unit's $CREDENTIALS_DIRECTORY; a PCR change fails closed.
-    install -d -m 0700 "$(dirname "$shareCred")"
-    install -d -m 0700 "$(dirname "$passCred")"
+    #    `mkdir -p -m 0700` applies the mode only to a freshly created leaf, so it never re-chmods
+    #    an existing (possibly shared) parent the way `install -d -m 0700` would; the sealed cred
+    #    files themselves are written 0600 by systemd-creds regardless.
+    mkdir -p -m 0700 "$(dirname "$shareCred")"
+    mkdir -p -m 0700 "$(dirname "$passCred")"
     systemd-creds encrypt --with-key=tpm2 --tpm2-pcrs=7 --name=oprf-share "$sharefile" "$shareCred"
     printf '%s' "$KEEP_PASSWORD" \
       | systemd-creds encrypt --with-key=tpm2 --tpm2-pcrs=7 --name=keep-password - "$passCred"
