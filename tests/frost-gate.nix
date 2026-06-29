@@ -2,10 +2,15 @@
 #   node  - mode = "tpm" (v1): TPM-sealed LUKS volume, auto-unlocked at boot. Grounded in nixpkgs
 #           nixos/tests/systemd-cryptenroll.nix (emptyDiskImages + tpm.enable +
 #           systemd-cryptenroll --tpm2-device=auto), unlocked by the keep-node-frost-gate service.
+#   recovery - mode = "tpm" with the opt-in recoveryKeyFile: first boot enrolls an extra LUKS
+#           recovery keyslot and writes its key (the escape hatch for a single-node PCR change).
 #   oprf  - mode = "oprf" (v2): threshold-OPRF quorum unlock. The live relay + remote holders and
 #           the TPM-sealed credentials are NOT reproduced in the VM (`keep` is a stub, no holders
 #           online), so this leg covers config evaluation, systemd unit wiring, and the fail-closed
 #           posture rather than a real end-to-end quorum unlock (which needs external infra).
+# The `node` leg also covers the data-loss branches: interrupted-provision reclaim, token-gone
+# fail-closed, and the oprf-volume mode-switch refusal. The dd-unreadable and wipefs-retry guards
+# are defensive against transient I/O and are not simulated deterministically here.
 # Run: nix build .#checks.x86_64-linux.frost-gate
 { ... }:
 {
@@ -52,6 +57,27 @@
         relay = "ws://127.0.0.1:7777";
         keepPasswordCred = "/var/lib/keep-node/keep-password.cred";
         oprfShareCred = "/var/lib/keep-node/oprf-share.cred";
+      };
+
+      environment.systemPackages = [ pkgs.cryptsetup ];
+
+      virtualisation = {
+        emptyDiskImages = [ 512 ];
+        tpm.enable = true;
+      };
+    };
+
+  # mode = "tpm" with the opt-in recoveryKeyFile: first-boot provisioning must enroll an extra
+  # LUKS recovery keyslot and write its key, so a single-node deploy can survive a PCR change.
+  nodes.recovery =
+    { pkgs, ... }:
+    {
+      imports = [ ../nixos/keep-node.nix ];
+
+      keepNode.frostGate = {
+        enable = true;
+        volumeDevice = "/dev/vdb";
+        recoveryKeyFile = "/var/lib/keep-node/recovery.key";
       };
 
       environment.systemPackages = [ pkgs.cryptsetup ];
@@ -147,6 +173,38 @@
     node.succeed("cryptsetup isLuks /dev/vdb")
     node.succeed("cryptsetup luksDump /dev/vdb | grep -q keep-node-frost-gate")
     node.succeed("cryptsetup luksDump /dev/vdb | grep -q keep-node-provisioned")
+
+    # Mode-switch data-loss guard: tpm and oprf modes share the LUKS label, so a tpm-mode gate must
+    # NOT wipe an oprf-provisioned volume. Re-stamp the subsystem marker to keep-node-oprf (our data
+    # and label intact) and reboot; the tpm gate must refuse fail-closed (its keep-node-oprf branch),
+    # not fall through to the reclaim-wipe.
+    node.succeed('cryptsetup config /dev/vdb --label keep-node-frost-gate --subsystem keep-node-oprf')
+    node.shutdown()
+    node.start()
+    node.wait_until_succeeds("systemctl is-failed --quiet keep-node-frost-gate.service")
+    node.succeed("journalctl -b -u keep-node-frost-gate.service | grep -q 'OPRF-provisioned'")
+    node.fail("test -e /dev/mapper/keep-vault")  # not unlocked, not wiped
+    # The oprf volume survived untouched: still LUKS, our label, the keep-node-oprf marker intact.
+    node.succeed("cryptsetup isLuks /dev/vdb")
+    node.succeed("cryptsetup luksDump /dev/vdb | grep -q keep-node-frost-gate")
+    node.succeed("cryptsetup luksDump /dev/vdb | grep -q keep-node-oprf")
+
+    # --- mode = "tpm" with recoveryKeyFile: opt-in recovery keyslot is enrolled on first boot. ---
+    recovery.start()
+    recovery.wait_for_unit("keep-node-frost-gate.service")
+    recovery.succeed("cryptsetup isLuks /dev/vdb")
+    # The recovery key file was written, owner-only (0600).
+    recovery.succeed("test -f /var/lib/keep-node/recovery.key")
+    recovery.succeed('test "$(stat -c %a /var/lib/keep-node/recovery.key)" = 600')
+    # It actually unlocks the volume INDEPENDENTLY of the TPM: the enrolled recovery passphrase
+    # (fed without its trailing newline) opens a keyslot. --test-passphrase checks it without
+    # activating a mapper. This is the escape hatch a PCR change would otherwise leave no path to.
+    recovery.succeed(
+        "printf '%s' \"$(cat /var/lib/keep-node/recovery.key)\" "
+        "| cryptsetup luksOpen --test-passphrase -d - /dev/vdb"
+    )
+    # The TPM2 token is still the primary keyslot; the recovery slot is additive, not a replacement.
+    recovery.succeed("systemd-cryptenroll /dev/vdb | grep -q tpm2")
 
     # --- mode = "oprf": config evaluation, unit wiring, fail-closed posture. ---
     # The live threshold-OPRF quorum (relay + remote holders) and the TPM-sealed credentials are
