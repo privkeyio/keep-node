@@ -113,9 +113,10 @@ let
   '';
 
   # mode = "oprf": every-boot unlock. The keep DB password and this box's OPRF share are
-  # TPM-decrypted (PCR 7) by systemd into $CREDENTIALS_DIRECTORY (ramfs) before this runs; the
-  # quorum reconstructs the 32-byte LUKS key into a RAM-only file ($RUNTIME_DIRECTORY tmpfs) that
-  # feeds cryptsetup (it never touches persistent disk). Fail-closed: any missing/changed PCR,
+  # TPM-decrypted (bound to the configured sealPcrs) by systemd into $CREDENTIALS_DIRECTORY
+  # (ramfs) before this runs; the quorum reconstructs the 32-byte LUKS key into a RAM-only file
+  # ($RUNTIME_DIRECTORY tmpfs) that feeds cryptsetup (it never touches persistent disk).
+  # Fail-closed: any missing/changed PCR,
   # absent marker, or failed quorum leaves the volume locked and vaultwarden down. OPRF
   # provisioning is operator-driven (the holders must be online), so a blank/unprovisioned device
   # does NOT auto-format here (unlike v1 TPM).
@@ -270,8 +271,8 @@ let
         # Provisioning ran to completion (the marker is written last, after mkfs), so a
         # filesystem exists and the volume may hold real data.
         if grep -q tpm2 <<<"$enrolled"; then
-          # Unlock via the TPM2 token (no passphrase, PCR 7). Fails closed if the TPM refuses
-          # (e.g. PCR change); vaultwarden then stays down, by design.
+          # Unlock via the TPM2 token (no passphrase, bound to the configured sealPcrs). Fails closed
+          # if the TPM refuses (e.g. PCR change); vaultwarden then stays down, by design.
           [ -e /dev/mapper/"$mapper" ] || ${systemdCryptsetup} attach "$mapper" "$dev" - tpm2-device=auto
         else
           # Marked complete but the TPM2 token is gone (PCR change, TPM clear, or a removed
@@ -328,8 +329,9 @@ let
   # Operator-driven one-time setup (NOT wantedBy boot). Needs KEEP_PASSWORD in the environment
   # and the OPRF holders online. Generates + distributes the OPRF key, LUKS-formats the volume
   # with the OPRF-derived key, then seals this box's share and the keep DB password to the TPM
-  # (PCR 7) as systemd-creds blobs. The transient LUKS key + share live on the unit's PrivateTmp
-  # tmpfs: protection comes from that tmpfs being RAM-only and torn down when the unit exits, NOT
+  # (bound to the configured sealPcrs) as systemd-creds blobs. The transient LUKS key + share
+  # live on the unit's PrivateTmp tmpfs: protection comes from that tmpfs being RAM-only and torn
+  # down when the unit exits, NOT
   # from secure erase (shred cannot guarantee erasure on tmpfs / copy-on-write backing).
   oprfProvisionScript = ''
     set -euo pipefail
@@ -407,8 +409,9 @@ let
     cryptsetup open --key-file "$keyfile" --keyfile-size 32 "$dev" "$mapper"
     mkfs.ext4 -F /dev/mapper/"$mapper"
 
-    # 3. Seal this box's OPRF share and the keep DB password to the TPM (PCR 7). At boot systemd
-    #    re-decrypts these into the gate unit's $CREDENTIALS_DIRECTORY; a PCR change fails closed.
+    # 3. Seal this box's OPRF share and the keep DB password to the TPM (bound to the configured
+    #    sealPcrs). At boot systemd re-decrypts these into the gate unit's $CREDENTIALS_DIRECTORY;
+    #    a PCR change fails closed.
     #    `mkdir -p -m 0700` applies the mode only to a freshly created leaf, so it never re-chmods
     #    an existing (possibly shared) parent the way `install -d -m 0700` would; the sealed cred
     #    files themselves are written 0600 by systemd-creds regardless.
@@ -546,7 +549,7 @@ in
     };
 
     sealPcrs = lib.mkOption {
-      type = lib.types.listOf lib.types.int;
+      type = lib.types.listOf (lib.types.ints.between 0 23);
       default = [ 7 ];
       example = [
         7
@@ -595,8 +598,9 @@ in
       type = lib.types.nullOr lib.types.str;
       default = null;
       description = ''
-        Path to the systemd-creds-encrypted (TPM2/PCR 7) blob holding the keep DB unlock password.
-        Decrypted into the unit's $CREDENTIALS_DIRECTORY (ramfs) at start; if a PCR changed the
+        Path to the systemd-creds-encrypted (TPM2, bound to the configured sealPcrs) blob holding
+        the keep DB unlock password. Decrypted into the unit's $CREDENTIALS_DIRECTORY (ramfs) at
+        start; if a PCR changed the
         decryption fails and the gate fails closed. Required for mode = "oprf".
       '';
     };
@@ -605,8 +609,9 @@ in
       type = lib.types.nullOr lib.types.str;
       default = null;
       description = ''
-        Path to the systemd-creds-encrypted (TPM2/PCR 7) blob holding this box's 64-byte OPRF
-        share. Decrypted into $CREDENTIALS_DIRECTORY at start (never written to persistent disk in
+        Path to the systemd-creds-encrypted (TPM2, bound to the configured sealPcrs) blob holding
+        this box's 64-byte OPRF share. Decrypted into $CREDENTIALS_DIRECTORY at start (never written
+        to persistent disk in
         the clear). Required for mode = "oprf".
       '';
     };
@@ -650,6 +655,10 @@ in
       {
         assertion = cfg.quorum.threshold <= cfg.quorum.total && cfg.quorum.threshold >= 1;
         message = "keepNode.frostGate.quorum: need 1 <= threshold <= total.";
+      }
+      {
+        assertion = cfg.sealPcrs != [ ];
+        message = "keepNode.frostGate.sealPcrs must bind at least one PCR; an empty list removes all measured-boot binding (fail-open: the TPM would release the key/creds regardless of boot state).";
       }
       {
         assertion = cfg.recoveryKeyFile == null || cfg.mode == "tpm";
