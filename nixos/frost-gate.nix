@@ -44,6 +44,39 @@ let
     "${utils.escapeSystemdPath cfg.volumeDevice}.device"
   ];
 
+  # Defense-in-depth confinement shared by the gate + provision oneshots. Deliberately
+  # conservative: both run cryptsetup/dm-crypt + blkid + mount, which legitimately need broad
+  # block-device, device-mapper, TPM, and AF_NETLINK (udev) access, so device-, syscall-, and
+  # filesystem-namespace sandboxing is intentionally omitted (it breaks those and buys little on a
+  # unit that must touch the raw disk). Filesystem-namespace options (ProtectHome, ProtectSystem,
+  # ...) are deliberately absent for a second reason: the gate `mount`s the vault for OTHER
+  # services (vaultwarden), and a private mount namespace would keep that mount from propagating to
+  # the host. What does lock down cheaply without breaking dm-crypt or the mount: no privilege
+  # escalation, no realtime/SUID/namespace surprises, and the socket families: tpm mode contacts no
+  # network at all; oprf mode additionally reaches the relay (the one path the attestation change
+  # widened), so AF_INET[6] is added only there. ProtectClock is deliberately NOT set: it implicitly
+  # appends DeviceAllow=char-rtc, which under the default DevicePolicy=auto flips device access to
+  # closed and would block the raw disk, /dev/mapper, and TPM these units must touch. AF_ALG stays in
+  # the family list so cryptsetup keeps working if its backend talks to the kernel crypto API (a local
+  # socket, never the network).
+  hardening = {
+    NoNewPrivileges = true;
+    ProtectHostname = true;
+    RestrictRealtime = true;
+    RestrictSUIDSGID = true;
+    RestrictNamespaces = true;
+    LockPersonality = true;
+    RestrictAddressFamilies = [
+      "AF_UNIX"
+      "AF_NETLINK"
+      "AF_ALG"
+    ]
+    ++ lib.optionals (cfg.mode == "oprf") [
+      "AF_INET"
+      "AF_INET6"
+    ];
+  };
+
   # The LUKS2 label stamped on our container; the wrong-device guards key off it.
   label = "keep-node-frost-gate";
 
@@ -420,7 +453,15 @@ in
     volumeDevice = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
-      description = "Block device backing the encrypted vault volume (e.g. /dev/vdb in the VM).";
+      description = ''
+        Block device backing the encrypted vault volume (e.g. /dev/vdb in the VM). On real
+        hardware use a STABLE path (/dev/disk/by-id/... or /dev/disk/by-uuid/...), not a
+        kernel-enumeration name like /dev/sdb: those can re-point at a different disk across
+        reboots or hotplug, and first-boot provisioning would then format the wrong device. The
+        wrong-device guard (refuses any non-keep-node signature), the dd readability check, and
+        the `bindsTo` ordering on this device's unit all reduce the blast radius, but a stable
+        path is the primary defense.
+      '';
     };
 
     dataDir = lib.mkOption {
@@ -630,6 +671,7 @@ in
         Type = "oneshot";
         RemainAfterExit = true;
       }
+      // hardening
       // lib.optionalAttrs (cfg.mode == "oprf") {
         # systemd TPM-decrypts these into $CREDENTIALS_DIRECTORY (ramfs) at unit start. If a PCR
         # changed, decryption fails, the unit fails, and the volume stays locked (fail-closed).
@@ -685,6 +727,7 @@ in
         # Private tmpfs for the transient LUKS key + OPRF share; torn down when the unit exits.
         PrivateTmp = true;
       }
+      // hardening
       // lib.optionalAttrs (cfg.keepPasswordEnvFile != null) {
         EnvironmentFile = cfg.keepPasswordEnvFile;
       };
