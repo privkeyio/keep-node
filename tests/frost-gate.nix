@@ -35,10 +35,11 @@
       };
     };
 
-  # mode = "oprf" wiring + fail-closed coverage. `keep` is stubbed: the fail-closed paths
-  # exercised here (missing TPM-sealed creds, blank/unprovisioned device) never reach the binary,
-  # so a stub is sufficient and avoids building keep-cli in the VM. A true end-to-end OPRF unlock
-  # needs the external relay + holder quorum and is out of scope for this harness.
+  # mode = "oprf" wiring + fail-closed + oprfGateScript coverage. `keep` is stubbed (exit 1): the
+  # script reaches it -- after decrypting the TPM-sealed creds and matching the keep-node-oprf
+  # marker -- and the stub's lack of a quorum is what makes it fail closed, so the gate's unlock
+  # path and credential check are exercised without building keep-cli or standing up a live quorum.
+  # A successful end-to-end quorum unlock (relay + holders) is covered by the oprf-unlock test.
   nodes.oprf =
     { pkgs, ... }:
     {
@@ -250,5 +251,39 @@
     oprf.fail("systemctl is-active --quiet vaultwarden.service")
     # The blank vault device was not touched (no LUKS signature written by the failed gate).
     oprf.fail("cryptsetup isLuks /dev/vdb")
+
+    # Now exercise oprfGateScript ITSELF with real inputs (the credential decrypt + the unlock
+    # branch), so the fail-closed above isn't only passing because the creds were missing. Seal the
+    # two creds to this TPM (PCR 7) -- the same key LoadCredentialEncrypted decrypts with -- and lay
+    # down a volume carrying our label + the keep-node-oprf completion marker so the gate takes the
+    # unlock branch. The stub keep has no quorum, so the script must fail closed AT the keep
+    # invocation, not before it. (A successful quorum unlock is covered end to end at the keep-cli
+    # level by the oprf-unlock test.)
+    oprf.succeed("mkdir -p /var/lib/keep-node")
+    oprf.succeed(
+        "printf 'dev-password' | systemd-creds encrypt --with-key=tpm2 --tpm2-pcrs=7 "
+        "--name=keep-password - /var/lib/keep-node/keep-password.cred"
+    )
+    oprf.succeed(
+        "head -c 64 /dev/urandom | systemd-creds encrypt --with-key=tpm2 --tpm2-pcrs=7 "
+        "--name=oprf-share - /var/lib/keep-node/oprf-share.cred"
+    )
+    oprf.succeed(
+        "echo dummy-bootstrap | cryptsetup luksFormat -q --label keep-node-frost-gate /dev/vdb -"
+    )
+    oprf.succeed("cryptsetup config /dev/vdb --label keep-node-frost-gate --subsystem keep-node-oprf")
+
+    # Re-run the gate: creds now load, the script runs, and the stub-keep unlock fails closed.
+    oprf.fail("systemctl restart keep-node-frost-gate.service")
+    # It REACHED `keep oprf-unlock` -- so the creds decrypted and the keep-node-oprf marker matched.
+    # That is the script/quorum logic failing closed, not a missing-credential abort before ExecStart.
+    oprf.succeed(
+        "journalctl -b -u keep-node-frost-gate.service | grep -qE 'stub keep invoked.*oprf-unlock'"
+    )
+    oprf.fail("test -e /dev/mapper/keep-vault")  # not unlocked
+    oprf.fail("systemctl is-active --quiet vaultwarden.service")
+    # The marker'd volume was NOT wiped by the failed unlock (oprf mode never auto-formats).
+    oprf.succeed("cryptsetup isLuks /dev/vdb")
+    oprf.succeed("cryptsetup luksDump /dev/vdb | grep -q keep-node-oprf")
   '';
 }
