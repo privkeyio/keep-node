@@ -26,8 +26,10 @@
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
 
-      # Pinned once: keep-web and keep-cli build from the same `keep` source revision.
-      keepVersion = "0.4.9";
+      # Derived from the pinned `keep` source so meta.version can't drift from the actual crate
+      # version: keep sets it once in [workspace.package] and the crates inherit it.
+      keepVersion =
+        (builtins.fromTOML (builtins.readFile "${keep}/Cargo.toml")).workspace.package.version;
 
       treefmtEval = treefmt-nix.lib.evalModule pkgs {
         projectRootFile = "flake.nix";
