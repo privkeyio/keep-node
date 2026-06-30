@@ -4,6 +4,24 @@ This chapter sets out what Keep Node protects, what it does not, and the assumpt
 guarantees rest on. It is deliberately conservative: a security appliance is only as honest
 as its threat model.
 
+## Current status
+
+Keep Node is an early scaffold, so this chapter describes the **target** design alongside
+what ships **today**. Read every guarantee below in that light:
+
+- **Today (default):** the vault is a TPM-sealed LUKS volume that **auto-unlocks at boot**,
+  with the key sealed to **PCR 7 only** (Secure Boot policy, not a real measured-boot
+  policy). This is full-disk encryption at rest: a powered-on box can unlock itself, there is
+  **no second holder**, and there is **no phone**. An opt-in `oprf` gate mode wires the
+  threshold-OPRF quorum unlock , the crates and the unlock path exist and are tested , but
+  it is not the default, and it is not a fully verified gate until measured boot lands.
+- **Target (in progress):** the 2-of-3 OPRF quorum described below, with a **phone holder
+  that does not exist yet** and the box's share sealed under a **real measured-boot PCR
+  policy** (the Lanzaboote work, not yet shipped). The "no single box can decrypt" property
+  holds only once those are in place.
+
+Sections below describe the target unless a "today" note says otherwise.
+
 ## Cryptography
 
 | Component | Implementation |
@@ -37,21 +55,31 @@ evaluation. Any two of the three reconstruct the key in the exponent; any one ca
 A wrong or malicious partial from any single holder causes a failed unlock, never a key
 leak: the combination is in the exponent, so an incorrect share simply does not reconstruct.
 
+**Today:** none of this quorum is active by default. The box holds a TPM-sealed LUKS key
+directly (PCR 7), there is no phone holder, and the replica quorum is not yet wired. The
+table describes the target the `oprf` gate mode and the holder devices are being built toward.
+
 ### A stolen, powered-off box
 
 An attacker who walks off with a powered-off node gets ciphertext. The vault volume is
-LUKS-encrypted; its key is not stored on the disk. The box holds at most one share of the
-unlock secret, which is below the quorum threshold and is sealed to the box's TPM, bound to
-a measured boot state. One share is cryptographically insufficient to derive the key, and
-the box keeps no local recovery keyslot to fall back on. Stealing the box, on its own,
-yields nothing usable.
+LUKS-encrypted and its key is not stored on the disk: today the key is sealed to the box's
+TPM (PCR 7), which will not release it on a different machine or a changed boot state, and in
+the target the box holds only one share of the unlock secret, below the quorum threshold and
+cryptographically insufficient to derive the key. Either way the box keeps no local recovery
+keyslot to fall back on (unless the opt-in recovery keyslot is enabled). Stealing the box,
+powered off, yields nothing usable.
 
 ### A powered-on box
 
-A running box still cannot unlock the vault by itself. Deriving the volume key requires a
-quorum, which means a second holder (the phone) has to evaluate the blinded element and a
-holder has to approve. The approval is not a policy toggle that the box can flip; it is a
-necessary step in the cryptography, because the box's single share is below threshold.
+This is where today and the target differ most. **Today, with the default TPM-only seal, a
+powered-on box does unlock its own vault** , the TPM releases the PCR-7-bound key at boot
+with no second party. That is exactly the limitation the quorum exists to remove. In the
+**target**, a running box still cannot unlock by itself: deriving the volume key requires a
+quorum, so a second holder (the phone) has to evaluate the blinded element and approve. That
+approval is not a policy toggle the box can flip; it is a necessary step in the cryptography,
+because the box's single share is below threshold. The opt-in `oprf` gate mode is the first
+step toward this, but the "a powered-on box cannot self-decrypt" property holds only once the
+phone holder and a real measured-boot policy are both in place.
 
 The honest boundary: a box that is actively compromised at the moment it unlocks
 necessarily learns that volume's key, because it must, in order to mount the disk. This is
@@ -96,11 +124,14 @@ vault. That replication is not yet implemented.
 
 ## Trust assumptions
 
-- **Measured boot and attestation.** The box's share is released only after a measured boot
-  state, and a holder only evaluates for a requester whose attestation is verified. These
-  guarantees are only as strong as the underlying measured-boot and attestation
-  configuration; a node guarding a real vault must configure its expected boot measurements,
-  because an unconfigured peer would be treated fail-open and is therefore refused.
+- **Measured boot and attestation.** In the target, the box's key material is released only
+  in the expected boot state, and a holder only evaluates for a requester whose attestation
+  is verified. Today the seal binds **PCR 7 only** (Secure Boot policy), which is weak: a real
+  measured-boot policy that also covers the kernel/initrd/UKI (PCR 11/12, the Lanzaboote work)
+  is not yet shipped. The attestation verifier itself does enforce a full PCR set, a fresh
+  nonce, and a pinned key; but these guarantees are only as strong as the boot stack that
+  populates those PCRs, and a node guarding a real vault must configure its expected
+  measurements, since an unconfigured peer is treated fail-open and is therefore refused.
 - **Holder devices.** The phone and replica are trusted to hold their shares and to gate
   approval. Compromise of a single holder is survivable: one share is below threshold, and a
   wrong partial only causes a failed unlock, never a key leak.
