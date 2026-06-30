@@ -15,8 +15,10 @@
 #     so this layer is full-disk-encryption at rest only. Making power-on insufficient to
 #     decrypt is v2's job (the FROST quorum needs the phone share, so a powered-on box alone
 #     cannot release the key).
-#   * Bound to PCR 7 only: PCR 7 binding is weak until real measured boot exists. The proper
-#     measured-boot PCR policy lands with the Lanzaboote work, not here.
+#   * Bound to PCR 7 by default: PCR 7 (Secure Boot policy) is weak: it does not measure the
+#     kernel/initrd/cmdline. The `sealPcrs` option can also bind PCR 11 (the UKI measurement),
+#     but PCR 11 is only populated once the box boots a Unified Kernel Image, which is the
+#     Lanzaboote/measured-boot work (not yet wired into the boot stack here).
 #   * No local recovery keyslot by default: the random bootstrap passphrase is discarded after
 #     enrollment on purpose. Writing a LUKS-unlocking recovery key to the (unencrypted) root would
 #     gut the "steal the box, get nothing" premise. Recovery is the node replicas (other nodes hold
@@ -79,6 +81,10 @@ let
 
   # The LUKS2 label stamped on our container; the wrong-device guards key off it.
   label = "keep-node-frost-gate";
+
+  # The PCRs the TPM seals bind, in systemd's "+"-joined form (e.g. "7" or "7+11"). Used by
+  # systemd-cryptenroll (tpm-mode unlock) and systemd-creds (oprf-mode cred seal).
+  sealPcrsArg = lib.concatMapStringsSep "+" toString cfg.sealPcrs;
 
   # Probe a block device directly (the blkid cache can be stale this early in boot). Sets
   # luks_type / luks_label / pt_type for the caller's wrong-device guard. $dev must be set.
@@ -239,7 +245,7 @@ let
       # step: PASSWORD unlocks for the enrollment, then the password slot is wiped, leaving
       # TPM2 (plus any opt-in recovery slot) as the keyslots. A standalone wipe would have
       # no passphrase to authenticate with and would block on a prompt in this no-tty unit.
-      PASSWORD="$pass" systemd-cryptenroll --wipe-slot=password --tpm2-device=auto --tpm2-pcrs=7 "$dev"
+      PASSWORD="$pass" systemd-cryptenroll --wipe-slot=password --tpm2-device=auto --tpm2-pcrs=${sealPcrsArg} "$dev"
       unset pass
       # Open via the TPM2 token (now the only slot) and lay down the filesystem.
       ${systemdCryptsetup} attach "$mapper" "$dev" - tpm2-device=auto
@@ -408,9 +414,9 @@ let
     #    files themselves are written 0600 by systemd-creds regardless.
     mkdir -p -m 0700 "$(dirname "$shareCred")"
     mkdir -p -m 0700 "$(dirname "$passCred")"
-    systemd-creds encrypt --with-key=tpm2 --tpm2-pcrs=7 --name=oprf-share "$sharefile" "$shareCred"
+    systemd-creds encrypt --with-key=tpm2 --tpm2-pcrs=${sealPcrsArg} --name=oprf-share "$sharefile" "$shareCred"
     printf '%s' "$KEEP_PASSWORD" \
-      | systemd-creds encrypt --with-key=tpm2 --tpm2-pcrs=7 --name=keep-password - "$passCred"
+      | systemd-creds encrypt --with-key=tpm2 --tpm2-pcrs=${sealPcrsArg} --name=keep-password - "$passCred"
 
     # 4. Completion marker (distinct from v1's keep-node-provisioned): the gate reads this to know
     #    the volume is OPRF-provisioned. Re-set --label in the same call (--subsystem alone clears
@@ -537,6 +543,28 @@ in
       type = lib.types.int;
       default = 1;
       description = "This box's FROST share index (the local u16 share id) used in the OPRF quorum.";
+    };
+
+    sealPcrs = lib.mkOption {
+      type = lib.types.listOf lib.types.int;
+      default = [ 7 ];
+      example = [
+        7
+        11
+      ];
+      description = ''
+        TPM PCRs the box's seals bind: the TPM2 LUKS keyslot in mode = "tpm" and the sealed
+        keep-password / OPRF-share credentials in mode = "oprf". A PCR change makes the seal
+        refuse to release, fail-closed.
+
+        The default `[ 7 ]` binds only Secure Boot policy, which is weak: it does not measure the
+        kernel, initrd, or kernel command line, so it does not detect a swapped kernel/initrd. A
+        real measured-boot policy adds **PCR 11** (the systemd-stub/UKI measurement of
+        kernel + initrd + cmdline + os-release), and PCR 11 is only populated when the box boots
+        through a Unified Kernel Image. Set `[ 7 11 ]` (or tighter) only once the box actually
+        boots a UKI (the Lanzaboote/measured-boot work); binding PCR 11 without a UKI seals to a
+        zero/garbage value and the next boot fails closed.
+      '';
     };
 
     tpmTcti = lib.mkOption {
