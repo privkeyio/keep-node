@@ -45,6 +45,18 @@ in
         not a static file.
       '';
     };
+
+    authTokenFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      description = ''
+        File holding the keep-web admin API bearer token (KEEP_WEB_AUTH_TOKEN_FILE). If unset,
+        keep-web generates a fresh random token on every start, so the admin API token rotates on
+        each reboot (fine while `listen` is loopback-only). Pin it to a stable secret before
+        keep-web is reachable off-box. Only the file PATH is placed in the environment; the token
+        itself stays in the file.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -65,6 +77,9 @@ in
       }
       // lib.optionalAttrs (cfg.passwordFile != null) {
         KEEP_PASSWORD_FILE = toString cfg.passwordFile;
+      }
+      // lib.optionalAttrs (cfg.authTokenFile != null) {
+        KEEP_WEB_AUTH_TOKEN_FILE = toString cfg.authTokenFile;
       };
       serviceConfig = {
         ExecStart = lib.getExe cfg.package;
