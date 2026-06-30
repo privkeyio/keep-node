@@ -598,6 +598,22 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    # A warning, not an assertion: kernel-enumeration names (/dev/sdb, /dev/vdb) are valid in a VM
+    # but on real hardware can re-point at a different disk across reboots/hotplug, and first-boot
+    # provisioning would then format the wrong one. Nudge toward a stable path without breaking the
+    # VM tests (which legitimately use /dev/vdb) or a deliberate non-by-* choice.
+    warnings =
+      lib.optional
+        (
+          cfg.volumeDevice != null
+          && !(lib.any (p: lib.hasPrefix p cfg.volumeDevice) [
+            "/dev/disk/by-id/"
+            "/dev/disk/by-uuid/"
+            "/dev/disk/by-partuuid/"
+          ])
+        )
+        "keepNode.frostGate.volumeDevice (${cfg.volumeDevice}) is not a stable /dev/disk/by-id or /dev/disk/by-uuid path. On real hardware a kernel-enumeration name (or topology-based /dev/disk/by-path) can re-point at a different disk, and first-boot provisioning could format the wrong device. See the volumeDevice option docs.";
+
     assertions = [
       {
         assertion = cfg.volumeDevice != null;
