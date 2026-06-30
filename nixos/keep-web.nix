@@ -65,7 +65,29 @@ in
         assertion = cfg.package != null;
         message = "keepNode.keepWeb.enable requires keepNode.keepWeb.package (set by the flake).";
       }
+      {
+        assertion =
+          cfg.passwordFile == null || !(lib.hasPrefix builtins.storeDir (toString cfg.passwordFile));
+        message = "keepNode.keepWeb.passwordFile must be a runtime path (e.g. /run/secrets/...), not a Nix store path: the password would be world-readable in /nix/store.";
+      }
+      {
+        assertion =
+          cfg.authTokenFile == null || !(lib.hasPrefix builtins.storeDir (toString cfg.authTokenFile));
+        message = "keepNode.keepWeb.authTokenFile must be a runtime path (e.g. /run/secrets/...), not a Nix store path: the token would be world-readable in /nix/store.";
+      }
     ];
+
+    warnings =
+      lib.optional
+        (
+          cfg.authTokenFile == null
+          && !(
+            lib.hasPrefix "127." cfg.listen
+            || lib.hasPrefix "localhost" cfg.listen
+            || lib.hasPrefix "[::1]" cfg.listen
+          )
+        )
+        "keepNode.keepWeb.listen is non-loopback but authTokenFile is unset; the admin API bearer token regenerates on every reboot.";
 
     systemd.services.keep-web = {
       description = "keep-web headless daemon";
@@ -76,16 +98,21 @@ in
         KEEP_PATH = cfg.path;
       }
       // lib.optionalAttrs (cfg.passwordFile != null) {
-        KEEP_PASSWORD_FILE = toString cfg.passwordFile;
+        KEEP_PASSWORD_FILE = "%d/password";
       }
       // lib.optionalAttrs (cfg.authTokenFile != null) {
-        KEEP_WEB_AUTH_TOKEN_FILE = toString cfg.authTokenFile;
+        KEEP_WEB_AUTH_TOKEN_FILE = "%d/authtoken";
       };
       serviceConfig = {
         ExecStart = lib.getExe cfg.package;
         DynamicUser = true;
         # Create the writable parent; keep-web creates the vault subdir (cfg.path) itself.
         StateDirectory = "keep-node";
+        # Deliver operator secrets via systemd credentials: read as root, re-exposed at
+        # 0400 in $CREDENTIALS_DIRECTORY (%d) for the transient DynamicUser UID.
+        LoadCredential =
+          lib.optional (cfg.passwordFile != null) "password:${toString cfg.passwordFile}"
+          ++ lib.optional (cfg.authTokenFile != null) "authtoken:${toString cfg.authTokenFile}";
         Restart = "on-failure";
       };
     };
