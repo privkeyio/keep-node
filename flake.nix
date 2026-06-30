@@ -84,6 +84,47 @@
         doCheck = false; # workspace tests, not needed to ship the binary
         meta.mainProgram = "keep";
       };
+
+      # Pure-eval guard for the frostGate sealPcrs hardening: the module must reject a sealPcrs
+      # that binds the TPM seal to nothing. An empty list makes --tpm2-pcrs= bind no PCRs
+      # (fail-open: the key releases regardless of boot state); an out-of-range index is a typo
+      # that would seal to a PCR that does not exist. This catches a future refactor that drops
+      # the non-empty assertion or the 0-23 type bound, without booting a VM.
+      frostGateToplevelEvals =
+        sealPcrs:
+        builtins.tryEval
+          (nixpkgs.lib.nixosSystem {
+            inherit system;
+            modules = [
+              ./nixos/keep-node.nix
+              {
+                fileSystems."/" = {
+                  device = "/dev/disk/by-label/root";
+                  fsType = "ext4";
+                };
+                boot.loader.grub.enable = false;
+                keepNode.frostGate = {
+                  enable = true;
+                  volumeDevice = "/dev/disk/by-id/ata-x";
+                  inherit sealPcrs;
+                };
+              }
+            ];
+          }).config.system.build.toplevel.drvPath;
+      # Split into named accept/reject outcomes so a failure names the violated expectation:
+      # a broken control (a valid set fails to evaluate) means the base config regressed and is
+      # distinct from the real security regression (a bad sealPcrs value is accepted).
+      validPcrsEvaluate =
+        (frostGateToplevelEvals [ 7 ]).success # a nominal PCR set evaluates
+        && (frostGateToplevelEvals [ 23 ]).success; # upper boundary of 0-23 still evaluates
+      badPcrsRejected =
+        !(frostGateToplevelEvals [ ]).success # empty list is rejected (fail-open guard)
+        && !(frostGateToplevelEvals [ (-1) ]).success # negative index is rejected (type bound)
+        && !(frostGateToplevelEvals [ 24 ]).success # out-of-range index is rejected (type bound)
+        && !(frostGateToplevelEvals [
+          7
+          24
+        ]).success; # partially-bad list is rejected
     in
     {
       packages.${system} = {
@@ -117,6 +158,14 @@
           _module.args.lanzaboote = lanzaboote;
         };
         formatting = treefmtEval.config.build.check self;
+        frost-gate-assertions = pkgs.runCommand "frost-gate-assertions" { } (
+          if !validPcrsEvaluate then
+            "echo 'frost-gate-assertions control broke: a valid sealPcrs set unexpectedly failed to evaluate (base config or nixpkgs regression, not the sealPcrs guard)' >&2; exit 1"
+          else if !badPcrsRejected then
+            "echo 'frostGate sealPcrs guard regression: a bad sealPcrs value (empty, negative, or out-of-range PCR) was unexpectedly accepted' >&2; exit 1"
+          else
+            "touch $out"
+        );
         # ha-failover = pkgs.testers.runNixOSTest { imports = [ ./tests/ha-failover.nix ]; };  # stub
       };
 
