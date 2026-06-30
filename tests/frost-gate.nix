@@ -50,7 +50,15 @@
         mode = "oprf";
         volumeDevice = "/dev/vdb";
         keepPackage = pkgs.writeShellScriptBin "keep" ''
-          echo "stub keep invoked (no live OPRF quorum in the VM): $*" >&2
+          # Read our capability bounding set with shell builtins only: this stub runs inside the
+          # confined transient systemd-run unit, which does NOT inherit the gate unit's PATH, so
+          # external grep/awk are not resolvable here. CapBnd is the direct value of the scope's
+          # CapabilityBoundingSet= (empty when confined), so the test can prove delegation from it.
+          capbnd=
+          while read -r field value _; do
+            if [ "$field" = "CapBnd:" ]; then capbnd=$value; fi
+          done < /proc/self/status
+          echo "stub keep invoked (no live OPRF quorum in the VM): $* CapBnd=$capbnd" >&2
           exit 1
         '';
         keepDbPath = "/var/lib/keep";
@@ -277,9 +285,16 @@
     oprf.fail("systemctl restart keep-node-frost-gate.service")
     # It REACHED `keep oprf-unlock` -- so the creds decrypted and the keep-node-oprf marker matched.
     # That is the script/quorum logic failing closed, not a missing-credential abort before ExecStart.
-    oprf.succeed(
-        "journalctl -b -u keep-node-frost-gate.service | grep -qE 'stub keep invoked.*oprf-unlock'"
-    )
+    # The relay-facing unlock now runs in a confined transient systemd-run scope; find its stub log
+    # in the boot journal (assert on message content, since --pipe hands the scope the gate unit's
+    # inherited journald stderr fd, so unit attribution alone can't prove delegation).
+    oprf.wait_until_succeeds("journalctl -b | grep -qE 'stub keep invoked.*oprf-unlock'")
+    # ...and confirm it was actually delegated to the sandbox, not run inline as uncapped root in the
+    # privileged gate unit (the whole point of the confinement). The transient scope sets
+    # CapabilityBoundingSet= (empty), so the delegated `keep` sees an all-zero CapBnd; inline in the
+    # gate (no CapabilityBoundingSet=) it would show the default full set. The CapBnd token is emitted
+    # on the SAME log line as the oprf-unlock args, so this proves confinement of that invocation.
+    oprf.wait_until_succeeds("journalctl -b | grep -qE 'oprf-unlock.*CapBnd=0000000000000000'")
     oprf.fail("test -e /dev/mapper/keep-vault")  # not unlocked
     oprf.fail("systemctl is-active --quiet vaultwarden.service")
     # The marker'd volume was NOT wiped by the failed unlock (oprf mode never auto-formats).
