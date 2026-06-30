@@ -13,7 +13,7 @@ what ships **today**. Read every guarantee below in that light:
   with the key sealed to **PCR 7 only** (Secure Boot policy, not a real measured-boot
   policy). This is full-disk encryption at rest: a powered-on box can unlock itself, there is
   **no second holder**, and there is **no phone**. An opt-in `oprf` gate mode wires the
-  threshold-OPRF quorum unlock , the crates and the unlock path exist and are tested , but
+  threshold-OPRF quorum unlock; the crates and the unlock path exist and are tested, but
   it is not the default, and it is not a fully verified gate until measured boot lands.
 - **Target (in progress):** the 2-of-3 OPRF quorum described below, with a **phone holder
   that does not exist yet** and the box's share sealed under a **real measured-boot PCR
@@ -57,7 +57,7 @@ leak: the combination is in the exponent, so an incorrect share simply does not 
 
 **Today:** none of this quorum is active by default. The box holds a TPM-sealed LUKS key
 directly (PCR 7), there is no phone holder, and the replica quorum is not yet wired. The
-table describes the target the `oprf` gate mode and the holder devices are being built toward.
+table describes the target that the `oprf` gate mode and the holder devices are being built toward.
 
 ### A stolen, powered-off box
 
@@ -72,7 +72,7 @@ powered off, yields nothing usable.
 ### A powered-on box
 
 This is where today and the target differ most. **Today, with the default TPM-only seal, a
-powered-on box does unlock its own vault** , the TPM releases the PCR-7-bound key at boot
+powered-on box does unlock its own vault**: the TPM releases the PCR-7-bound key at boot
 with no second party. That is exactly the limitation the quorum exists to remove. In the
 **target**, a running box still cannot unlock by itself: deriving the volume key requires a
 quorum, so a second holder (the phone) has to evaluate the blinded element and approve. That
