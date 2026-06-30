@@ -105,6 +105,9 @@
         frost-gate = pkgs.testers.runNixOSTest {
           imports = [ ./tests/frost-gate.nix ];
         };
+        ingress = pkgs.testers.runNixOSTest {
+          imports = [ ./tests/ingress.nix ];
+        };
         oprf-unlock = pkgs.testers.runNixOSTest {
           imports = [ ./tests/oprf-unlock.nix ];
           _module.args.keepCliPackage = keep-cli;
