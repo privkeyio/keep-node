@@ -22,6 +22,21 @@ The threshold unlock primitive is covered in detail in the
 
 ## Threat model
 
+### What each holder holds
+
+The unlock secret is split into a 2-of-3 quorum across three heterogeneous holders. No
+holder ever sees the volume key; each holds one share and contributes only a blinded partial
+evaluation. Any two of the three reconstruct the key in the exponent; any one cannot.
+
+| Holder | What it holds | What protects it | What compromising it alone yields |
+|--------|---------------|------------------|-----------------------------------|
+| Box (this node) | One OPRF share, TPM-sealed under a measured-boot policy; never on disk in the clear | The TPM seal + measured boot | One share, below threshold: no key, and the box cannot self-unlock |
+| Phone | One OPRF share in the phone's hardware-backed keystore; also gates approval | Mobile hardware keystore + user-present approval | One share, below threshold: no key; a wrong partial only fails the unlock |
+| Replica | One OPRF share on a second node or a managed ciphertext-only replica; provides availability and recovery | The replica's own boot/attestation posture | One share, below threshold: no key |
+
+A wrong or malicious partial from any single holder causes a failed unlock, never a key
+leak: the combination is in the exponent, so an incorrect share simply does not reconstruct.
+
 ### A stolen, powered-off box
 
 An attacker who walks off with a powered-off node gets ciphertext. The vault volume is
@@ -44,6 +59,17 @@ true of all full-disk encryption. The quorum protects the key at rest and gates 
 unlock on a second holder; it does not protect a live, compromised, running system. Keep
 Node does not claim to.
 
+### Duress and coercion
+
+The quorum protects against theft and remote compromise, not against an attacker who coerces
+a present, cooperating user: a user forced to unlock can be forced to do so with the real
+quorum. For that threat the underlying `keep-core` carries a hidden-volume primitive
+(`keep_core::hidden`): a vault can hold a second storage area that is cryptographically
+indistinguishable from random padding, so unlocking with a decoy credential reveals only the
+decoy contents and the existence of the hidden area cannot be proven. Keep Node does not yet
+expose a decoy-credential flow on top of this primitive; wiring a duress/decoy unlock into
+the appliance is future work, and until it ships Keep Node makes no duress claim.
+
 ### The evaluation oracle
 
 Because the unlock input is a fixed, low-entropy label, the holder's evaluation oracle is
@@ -62,6 +88,11 @@ threshold. A compromised relay can drop or delay traffic, which degrades availab
 it cannot decrypt the vault, derive the volume key, or sign. Vaultwarden is bound to
 localhost and never serves plaintext HTTP on the LAN; remote access is over the encrypted
 transport, which terminates to loopback.
+
+Inter-node replication (the planned multi-node HA) is held to the same rule: nodes replicate
+each other's encrypted state only, never plaintext and never an at-or-above-threshold set of
+shares, so a node or its sync path can degrade availability but cannot decrypt another node's
+vault. That replication is not yet implemented.
 
 ## Trust assumptions
 
