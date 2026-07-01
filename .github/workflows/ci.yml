@@ -45,6 +45,12 @@ jobs:
           primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock', '**/*.nix') }}
           restore-prefixes-first-match: nix-${{ runner.os }}-
 
-      # Builds packages (keep-web) and runs checks (the M0 VM test: Vaultwarden + keep-web).
+      # Builds packages (keep-web) and runs the checks (VM tests + eval guards).
+      # --max-jobs 1 serializes the builds so only ONE nixosTest runs at a time. The suite now
+      # includes several heavy QEMU guests (the oprf-unlock 3-VM quorum and the OVMF/UKI
+      # measured-boot + measured-seal tests); running them concurrently starves the runner's
+      # CPU/RAM and intermittently makes an unrelated test's Vaultwarden crash-loop into a 900s
+      # timeout. Serializing trades wall-clock for reliability. (If CI speed becomes a problem,
+      # split the checks into a per-check job matrix so each runs isolated on its own runner.)
       - name: Flake check
-        run: nix flake check -L
+        run: nix flake check -L --max-jobs 1
