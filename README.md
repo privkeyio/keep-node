@@ -69,7 +69,7 @@ Build a bootable USB installer and install keep-node on a real UEFI machine.
 
 4. After first boot, console autologin and SSH are available; default login is `root` / `keepnode`, change it immediately (`passwd`). Find the node's IP with `ip a`, then open the Vaultwarden web vault from the LAN at `https://<node-ip>` (self-signed cert, accept the browser warning; plain HTTP won't work because the web vault needs a secure context).
 
-> **Insecure by design (bring-up only).** This image enables an opt-in, test-grade `debugAccess` config: known root password, password SSH, open signups, self-signed TLS. Disable it (`keepNode.debugAccess.enable = false`) for any real deployment. `frost-gate` is off here, so Vaultwarden data sits on the plain disk with no TPM unlock yet.
+> **Insecure by design (bring-up only).** The installer image is the `keepnode-debug` profile: it enables an opt-in, test-grade `debugAccess` config (known root password, password SSH, open signups, self-signed TLS) so a fresh box is reachable over the LAN before the encrypted transport lands. For any real deployment, deploy the hardened `nixosConfigurations.keepnode` profile instead (debugAccess off, SSH off, signups default-deny), not `keepnode-debug`. `frost-gate` is off in both, so Vaultwarden data sits on the plain disk with no TPM unlock yet.
 
 ## License
 
