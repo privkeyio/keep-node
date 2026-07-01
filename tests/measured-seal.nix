@@ -105,10 +105,26 @@
       machine.succeed("findmnt -n -o SOURCE /var/lib/vaultwarden | grep -q '/dev/mapper/keep-vault'")
       machine.succeed("grep -qx keep-node-canary /var/lib/vaultwarden/canary")
 
-      # Fail closed on a changed boot. The successful unlock above is the positive control: at the
-      # sealed PCR 11 the TPM released the key. Now extend PCR 11 to a different value, which is what
-      # a swapped kernel/initrd/cmdline would measure, and confirm the TPM refuses to release the key
-      # so a fresh unlock attempt fails and no mapper is created. This is the tamper-detection
+      # The tamper check below must exercise the TPM's PCR policy, which means the vault device has
+      # to be FREE: while the gate keeps /dev/vdb open as keep-vault, any tpm-unseal-attempt dies at
+      # systemd-cryptsetup's "device in use" guard BEFORE the TPM is consulted, so both the positive
+      # control and the negative check would resolve for a device-busy reason rather than the PCR
+      # policy. Tear the live vault down first (unmount the vault, close the mapper) so the attempts
+      # below actually reach the TPM.
+      machine.succeed("umount /var/lib/vaultwarden")
+      machine.succeed("cryptsetup close keep-vault")
+
+      # Positive control on the helper itself: with the device free and PCR 11 unchanged, the same
+      # tpm-unseal-attempt helper makes the TPM release the key and unseals cleanly. This ties the
+      # tamper failure below to the PCR 11 change and not to a broken helper path (bad arg, device
+      # busy, missing device).
+      machine.succeed("tpm-unseal-attempt precheck")
+      machine.succeed("test -e /dev/mapper/precheck")
+      machine.succeed("cryptsetup close precheck")
+
+      # Fail closed on a changed boot. Extend PCR 11 to a different value, which is what a swapped
+      # kernel/initrd/cmdline would measure, and confirm the TPM refuses to release the key so a fresh
+      # unlock through the identical helper fails and no mapper is created. This is the tamper-detection
       # property measured boot exists to provide. A PCR extend is irreversible until reboot, so this
       # runs last. There is no passphrase keyslot to fall back on (the gate wipes it after enrolling
       # the TPM2 token), so the attempt fails rather than prompting.
