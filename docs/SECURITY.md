@@ -14,10 +14,12 @@ what ships **today**. Read every guarantee below in that light:
   policy). This is full-disk encryption at rest: a powered-on box can unlock itself, there is
   **no second holder**, and there is **no phone**. An opt-in `oprf` gate mode wires the
   threshold-OPRF quorum unlock; the crates and the unlock path exist and are tested, but
-  it is not the default, and it is not a fully verified gate until measured boot lands.
+  it is not the default, and it is only a fully verified gate once measured boot is enabled
+  (available as the opt-in `keepNode.measuredBoot` module, off by default).
 - **Target (in progress):** the 2-of-3 OPRF quorum described below, with a **phone holder
   that does not exist yet** and the box's share sealed under a **real measured-boot PCR
-  policy** (the Lanzaboote work, not yet shipped). The "no single box can decrypt" property
+  policy** (the Lanzaboote work, shipped as the opt-in `keepNode.measuredBoot` module but not
+  the default appliance). The "no single box can decrypt" property
   holds only once those are in place.
 
 Sections below describe the target unless a "today" note says otherwise.
@@ -127,8 +129,8 @@ vault. That replication is not yet implemented.
 - **Measured boot and attestation.** In the target, the box's key material is released only
   in the expected boot state, and a holder only evaluates for a requester whose attestation
   is verified. Today the seal binds **PCR 7 only** (Secure Boot policy), which is weak: a real
-  measured-boot policy that also covers the kernel/initrd/UKI (PCR 11/12, the Lanzaboote work)
-  is not yet shipped. The attestation verifier itself does enforce a full PCR set, a fresh
+  measured-boot policy that also covers the kernel/initrd/UKI (PCR 11, the Lanzaboote work)
+  is not the default; enable it with the opt-in `keepNode.measuredBoot` module. The attestation verifier itself does enforce a full PCR set, a fresh
   nonce, and a pinned key; but these guarantees are only as strong as the boot stack that
   populates those PCRs, and a node guarding a real vault must configure its expected
   measurements, since an unconfigured peer is treated fail-open and is therefore refused.

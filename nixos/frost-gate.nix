@@ -17,8 +17,10 @@
 #     cannot release the key).
 #   * Bound to PCR 7 by default: PCR 7 (Secure Boot policy) is weak: it does not measure the
 #     kernel/initrd/cmdline. The `sealPcrs` option can also bind PCR 11 (the UKI measurement),
-#     but PCR 11 is only populated once the box boots a Unified Kernel Image, which is the
-#     Lanzaboote/measured-boot work (not yet wired into the boot stack here).
+#     but PCR 11 is only populated once the box boots a Unified Kernel Image, available opt-in via
+#     `keepNode.measuredBoot.enable` (the Lanzaboote UKI boot stack). An assertion below refuses a
+#     `sealPcrs` containing 11 unless measured boot is enabled, so the seal can never bind an
+#     unpopulated PCR 11.
 #   * No local recovery keyslot by default: the random bootstrap passphrase is discarded after
 #     enrollment on purpose. Writing a LUKS-unlocking recovery key to the (unencrypted) root would
 #     gut the "steal the box, get nothing" premise. Recovery is the node replicas (other nodes hold
@@ -611,9 +613,10 @@ in
         kernel, initrd, or kernel command line, so it does not detect a swapped kernel/initrd. A
         real measured-boot policy adds **PCR 11** (the systemd-stub/UKI measurement of
         kernel + initrd + cmdline + os-release), and PCR 11 is only populated when the box boots
-        through a Unified Kernel Image. Set `[ 7 11 ]` (or tighter) only once the box actually
-        boots a UKI (the Lanzaboote/measured-boot work); binding PCR 11 without a UKI seals to a
-        zero/garbage value and the next boot fails closed.
+        through a Unified Kernel Image, available opt-in via `keepNode.measuredBoot.enable`. Set
+        `[ 7 11 ]` (or tighter) once measured boot is enabled; the module asserts this pairing,
+        since binding PCR 11 without a UKI seals to a zero/garbage value and the next boot fails
+        closed.
       '';
     };
 
