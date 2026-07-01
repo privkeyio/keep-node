@@ -13,6 +13,13 @@
       url = "github:numtide/treefmt-nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    # Measured boot: Lanzaboote builds + signs the Unified Kernel Image so systemd-stub measures
+    # the kernel/initrd/cmdline into TPM PCR 11. Consumed only by the opt-in keepNode.measuredBoot
+    # module and the measured-boot test; pinned so the boot stack is reproducible.
+    lanzaboote = {
+      url = "github:nix-community/lanzaboote/v1.1.0";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -21,6 +28,7 @@
       nixpkgs,
       keep,
       treefmt-nix,
+      lanzaboote,
     }:
     let
       system = "x86_64-linux";
@@ -100,6 +108,10 @@
         oprf-unlock = pkgs.testers.runNixOSTest {
           imports = [ ./tests/oprf-unlock.nix ];
           _module.args.keepCliPackage = keep-cli;
+        };
+        measured-boot = pkgs.testers.runNixOSTest {
+          imports = [ ./tests/measured-boot.nix ];
+          _module.args.lanzaboote = lanzaboote;
         };
         formatting = treefmtEval.config.build.check self;
         # ha-failover = pkgs.testers.runNixOSTest { imports = [ ./tests/ha-failover.nix ]; };  # stub
