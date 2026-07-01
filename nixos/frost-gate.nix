@@ -692,6 +692,17 @@ in
           );
         message = "keepNode.frostGate.tpmTcti must be a hardware TPM TCTI in mode = \"oprf\" (a software/emulator TCTI such as mssim/swtpm/libtpms makes the measured-boot attestation fail open).";
       }
+      {
+        # PCR 11 is only populated when the box boots a Unified Kernel Image (systemd-stub). Binding
+        # a seal to it without UKI boot seals to an unpopulated/zero PCR 11, and the next boot fails
+        # closed. `or false` so this holds whether or not the lanzaboote/measured-boot modules are
+        # imported (the option simply does not exist otherwise).
+        assertion =
+          !(builtins.elem 11 cfg.sealPcrs)
+          || (config.boot.lanzaboote.enable or false)
+          || (config.keepNode.measuredBoot.enable or false);
+        message = "keepNode.frostGate.sealPcrs includes PCR 11, but PCR 11 is only measured when the box boots a Unified Kernel Image. Enable measured boot (keepNode.measuredBoot.enable = true) or remove 11 from sealPcrs; otherwise the seal binds an unpopulated PCR 11 and the next boot fails closed.";
+      }
     ];
 
     # The gate. mode = "tpm" (v1): provision on first boot, TPM2-unlock every boot. mode = "oprf"

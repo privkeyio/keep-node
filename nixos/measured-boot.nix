@@ -39,6 +39,13 @@ in
       description = ''
         Directory holding the Secure Boot PKI (created with `sbctl create-keys`) that Lanzaboote
         uses to sign the Unified Kernel Images. Must persist across rebuilds.
+
+        Provision it out of band BEFORE the first `nixos-rebuild switch` with this module enabled:
+        Lanzaboote signs the UKI during the switch and the rebuild fails if the signing key is
+        absent (this module sets neither `boot.lanzaboote.autoGenerateKeys` nor `allowUnsigned`).
+        This directory holds the Secure Boot db signing private key, so it must be root-owned with
+        restrictive permissions (`sbctl` creates it 0700 with 0600 keys); a leaked db.key lets an
+        attacker sign a UKI the firmware will trust.
       '';
     };
   };
