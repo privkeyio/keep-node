@@ -27,6 +27,13 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
+      # The measured-boot test builds its disk image with systemd-repart (via lanzaboote's
+      # image harness), which needs an unprivileged user namespace. ubuntu-latest (24.04)
+      # blocks that via AppArmor, so the repart build fails with
+      # "unshare: write failed /proc/self/uid_map: Operation not permitted".
+      - name: Allow unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       - name: Install Nix
         # Pinned to a full commit SHA (v22) so CI never runs a mutable upstream ref.
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25
