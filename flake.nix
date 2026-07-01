@@ -157,6 +157,10 @@
           imports = [ ./tests/measured-boot.nix ];
           _module.args.lanzaboote = lanzaboote;
         };
+        measured-seal = pkgs.testers.runNixOSTest {
+          imports = [ ./tests/measured-seal.nix ];
+          _module.args.lanzaboote = lanzaboote;
+        };
         formatting = treefmtEval.config.build.check self;
         frost-gate-assertions = pkgs.runCommand "frost-gate-assertions" { } (
           if !validPcrsEvaluate then
