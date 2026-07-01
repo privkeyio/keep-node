@@ -14,12 +14,39 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check:
+  # Enumerate the flake's checks so each runs as its own isolated job below. Generated (not
+  # hardcoded) so a newly added check is picked up automatically and can never silently stop
+  # running in CI.
+  discover:
     runs-on: ubuntu-latest
+    outputs:
+      checks: ${{ steps.list.outputs.checks }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Nix
+        # Pinned to a full commit SHA (v22) so CI never runs a mutable upstream ref.
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25
+      - id: list
+        run: |
+          checks=$(nix eval --json '.#checks.x86_64-linux' --apply builtins.attrNames)
+          echo "checks=$checks" >> "$GITHUB_OUTPUT"
+
+  # One check per job, isolated on its own runner. The suite includes several heavy QEMU guests
+  # (the oprf-unlock 3-VM quorum and the OVMF/UKI measured-boot + measured-seal tests); running
+  # them concurrently in a single `nix flake check` starved the runner and intermittently timed a
+  # test out (an unrelated Vaultwarden crash-looping). Giving each check its own runner removes the
+  # contention and keeps wall-clock ≈ the slowest single test regardless of suite size.
+  check:
+    needs: discover
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        check: ${{ fromJSON(needs.discover.outputs.checks) }}
     steps:
       - uses: actions/checkout@v6
 
-      # The M0 nixosTest boots a QEMU VM; KVM makes it fast (and avoids timeouts).
+      # The nixosTests boot QEMU VMs; KVM makes them fast (and avoids timeouts).
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
@@ -27,9 +54,9 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
-      # The measured-boot test builds its disk image with systemd-repart (via lanzaboote's
-      # image harness), which needs an unprivileged user namespace. ubuntu-latest (24.04)
-      # blocks that via AppArmor, so the repart build fails with
+      # The measured-boot/measured-seal tests build their disk image with systemd-repart (via
+      # lanzaboote's image harness), which needs an unprivileged user namespace. ubuntu-latest
+      # (24.04) blocks that via AppArmor, so the repart build fails with
       # "unshare: write failed /proc/self/uid_map: Operation not permitted".
       - name: Allow unprivileged user namespaces
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
@@ -38,13 +65,12 @@ jobs:
         # Pinned to a full commit SHA (v22) so CI never runs a mutable upstream ref.
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25
 
-      # Cache /nix/store so keep-web (built from privkeyio/keep) isn't recompiled every run.
+      # Cache /nix/store so keep-web/keep-cli (built from privkeyio/keep) aren't recompiled every run.
       - name: Nix store cache
         uses: nix-community/cache-nix-action@v6
         with:
           primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock', '**/*.nix') }}
           restore-prefixes-first-match: nix-${{ runner.os }}-
 
-      # Builds packages (keep-web) and runs checks (the M0 VM test: Vaultwarden + keep-web).
-      - name: Flake check
-        run: nix flake check -L
+      - name: Build check
+        run: nix build -L '.#checks.x86_64-linux.${{ matrix.check }}'
