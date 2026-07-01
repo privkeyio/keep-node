@@ -31,8 +31,8 @@ let
     [ "$confirm" = "YES" ] || { echo "Aborted."; exit 1; }
 
     # Make re-runs in the same boot safe: release anything left mounted by a prior failed run.
-    umount -R /mnt 2>/dev/null || true
-    swapoff -a 2>/dev/null || true
+    ${pkgs.util-linux}/bin/umount -R /mnt 2>/dev/null || true
+    ${pkgs.util-linux}/bin/swapoff -a 2>/dev/null || true
 
     ${pkgs.util-linux}/bin/wipefs -a "$disk"
     ${pkgs.gptfdisk}/bin/sgdisk --zap-all "$disk"
@@ -57,11 +57,13 @@ let
     # Mount the partitions we just created by their device node. The udevadm settle above makes
     # this safe from the re-read race; mounting by label could resolve to another disk that
     # happens to share the "nixos"/"ESP" label.
-    mount "$p2" /mnt
-    mkdir -p /mnt/boot
-    mount "$p1" /mnt/boot
+    ${pkgs.util-linux}/bin/mount "$p2" /mnt
+    ${pkgs.coreutils}/bin/mkdir -p /mnt/boot
+    ${pkgs.util-linux}/bin/mount "$p1" /mnt/boot
 
     # --system installs the pre-built, embedded closure: no eval, no network, no rebuild.
+    # nixos-install is intentionally unpinned: it comes from the installation-cd environment's
+    # system PATH, not a pkgs attr.
     nixos-install --system ${keepnodeToplevel} --no-root-password --no-channel-copy
 
     echo

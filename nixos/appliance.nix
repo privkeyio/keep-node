@@ -3,7 +3,7 @@
 # Disk-agnostic on purpose: filesystems are matched by label (the installer creates an ESP
 # labelled ESP and a root labelled nixos), so the same image installs to /dev/sda, /dev/nvme0n1,
 # etc. without rebuilding. frost-gate is off, so Vaultwarden's state is on the plain root disk.
-{ lib, ... }:
+{ ... }:
 {
   networking.hostName = "keepnode";
 
@@ -30,9 +30,4 @@
     device = "/dev/disk/by-label/ESP";
     fsType = "vfat";
   };
-
-  # Test-grade access (SSH, console autologin, LAN web UI). Insecure by design; see the module.
-  keepNode.debugAccess.enable = true;
-  # Let the first user self-register through the web vault for this test bring-up.
-  keepNode.vaultwarden.signupsAllowed = lib.mkForce true;
 }

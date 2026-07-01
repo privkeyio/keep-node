@@ -126,24 +126,42 @@
           24
         ]).success; # partially-bad list is rejected
 
-      # The appliance, as it lands on real hardware: UEFI, Vaultwarden on, keep-web and
-      # frost-gate off (frost-gate TPM unlock is opt-in and added later), plus the opt-in
-      # debug-access module (console autologin, SSH, LAN web UI over self-signed TLS).
+      # The hardened appliance, as it lands on real hardware: UEFI, Vaultwarden on, keep-web and
+      # frost-gate off (frost-gate TPM unlock is opt-in and added later). debug-access is NOT
+      # included and Vaultwarden signups default-deny, so this is the secure default profile.
       keepnodeSystem = nixpkgs.lib.nixosSystem {
         inherit system;
         modules = [
           ./nixos/keep-node.nix
           ./nixos/appliance.nix
+        ];
+      };
+
+      # The insecure bring-up profile: the hardened appliance plus the opt-in debug-access module
+      # (console autologin, password SSH, LAN web UI over self-signed TLS) and open Vaultwarden
+      # signups. Used only because there is no mesh/Tor transport yet, so the box has to be
+      # reachable over the plain LAN to be provisioned. Do not ship this as the default.
+      keepnodeDebugSystem = nixpkgs.lib.nixosSystem {
+        inherit system;
+        modules = [
+          ./nixos/keep-node.nix
+          ./nixos/appliance.nix
           ./nixos/debug-access.nix
+          {
+            keepNode.debugAccess.enable = true;
+            keepNode.vaultwarden.signupsAllowed = nixpkgs.lib.mkForce true;
+          }
         ];
       };
 
       # A self-contained UEFI installer ISO. It embeds the full appliance closure (see
       # installer.nix) so `install-keepnode /dev/DISK` wipes the target and installs offline.
+      # It installs the reachable bring-up image (debug profile) so the hardware-validated flow
+      # holds: USB boot -> install -> reach Vaultwarden over HTTPS on the LAN.
       installerSystem = nixpkgs.lib.nixosSystem {
         inherit system;
         specialArgs = {
-          keepnodeToplevel = keepnodeSystem.config.system.build.toplevel;
+          keepnodeToplevel = keepnodeDebugSystem.config.system.build.toplevel;
         };
         modules = [
           (nixpkgs + "/nixos/modules/installer/cd-dvd/installation-cd-minimal.nix")
@@ -161,6 +179,7 @@
 
       nixosConfigurations = {
         keepnode = keepnodeSystem;
+        keepnode-debug = keepnodeDebugSystem;
         installer = installerSystem;
       };
 
