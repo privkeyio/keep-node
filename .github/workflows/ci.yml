@@ -53,6 +53,21 @@ jobs:
             | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
+          # trigger is async; settle so the 0666 mode is applied before the verify step reads it
+          sudo udevadm settle
+
+      # Fail fast (in seconds, with a clear message) if this runner has no usable KVM. Without
+      # acceleration the VMs fall back to software emulation, run ~15x slower, and time out mid-boot
+      # (the sysroot.mount timeout that flaked the ingress job). Better to fail obviously and re-run
+      # onto a KVM-capable runner than to burn minutes on a mystery timeout.
+      - name: Verify KVM acceleration
+        run: |
+          if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+            echo "::error::/dev/kvm is not accessible; VM tests would run under slow software emulation. Re-run to land a KVM-capable runner."
+            ls -l /dev/kvm 2>&1 || true
+            exit 1
+          fi
+          echo "KVM OK: $(ls -l /dev/kvm)"
 
       # The measured-boot/measured-seal tests build their disk image with systemd-repart (via
       # lanzaboote's image harness), which needs an unprivileged user namespace. ubuntu-latest
