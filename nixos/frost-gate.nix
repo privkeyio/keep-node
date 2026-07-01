@@ -39,6 +39,7 @@
 let
   cfg = config.keepNode.frostGate;
   systemdCryptsetup = "${pkgs.systemd}/lib/systemd/systemd-cryptsetup";
+  systemdRun = "${pkgs.systemd}/bin/systemd-run";
 
   # The systemd .device unit for the backing volume (empty when unset). The gate orders after
   # and requires it so the probe never races a device that has not yet appeared/settled.
@@ -60,7 +61,9 @@ let
   # appends DeviceAllow=char-rtc, which under the default DevicePolicy=auto flips device access to
   # closed and would block the raw disk, /dev/mapper, and TPM these units must touch. AF_ALG stays in
   # the family list so cryptsetup keeps working if its backend talks to the kernel crypto API (a local
-  # socket, never the network).
+  # socket, never the network). NOTE: the relay parser gets a SECOND, stricter sandbox via the inline
+  # `systemd-run -p` flags in oprfGateScript below (empty caps, proc/socket confinement, no AF_ALG);
+  # the two lists are intentionally distinct, so edit both together when changing hardening.
   hardening = {
     NoNewPrivileges = true;
     ProtectHostname = true;
@@ -146,20 +149,64 @@ let
           # pipefail, turns a correct unlock into a unit failure (boot fails closed). The key
           # never touches persistent disk and is removed immediately after open.
           keyf="$RUNTIME_DIRECTORY/luks.key"
-          trap 'rm -f "$keyf"' EXIT
-          # On a stop-timeout SIGTERM (or INT) scrub the key, then actually terminate rather
+          # The relay parser runs in its own confined transient scope (see below); that scope
+          # cannot see this unit's private $CREDENTIALS_DIRECTORY, so stage the TPM-decrypted
+          # share into the unit's tmpfs RuntimeDirectory (0400) where the scope can read it.
+          sharef="$RUNTIME_DIRECTORY/oprf-share"
+          trap 'rm -f "$keyf" "$sharef"' EXIT
+          # On a stop-timeout SIGTERM (or INT) scrub the secrets, then actually terminate rather
           # than resuming: the explicit exit fires the EXIT trap too (idempotent rm -f).
-          trap 'rm -f "$keyf"; exit 1' TERM INT
+          trap 'rm -f "$keyf" "$sharef"; exit 1' TERM INT
+          install -m 0400 "$CREDENTIALS_DIRECTORY/oprf-share" "$sharef"
+          # Run `keep oprf-unlock` in a tightly-sandboxed transient scope, NOT inline. It parses
+          # responses from a semi-trusted network relay; inline it would do so in the same privileged
+          # unit that runs cryptsetup/dm-crypt/mount. Confining it is strong defense-in-depth: the
+          # scope drops all capabilities, forbids new privileges, filters syscalls to @system-service
+          # (no raw-IO/mount/reboot), bars W+X memory, bounds its own runtime, and blocks the PID1
+          # control + system D-Bus sockets a compromised parser would use to ask an unconfined unit
+          # to re-escalate past the empty capability set. Residual, stated honestly: the scope still
+          # runs as root (uid 0), so an RCE could still DAC-read root-owned files -- full filesystem
+          # confinement / non-root execution (DynamicUser) is a documented follow-up, not yet applied
+          # (it needs VM validation, and DynamicUser interacts with the mounts the gate propagates).
+          # The `-p` flags below are deliberately SEPARATE from and MORE confining than the
+          # `hardening` attrset above: they add proc/socket/runtime confinement the gate itself can't
+          # take (the gate propagates the vault mount and must stay uncapped for cryptsetup) and drop
+          # AF_ALG (no cryptsetup runs in this scope). The two lists can silently drift -- edit both
+          # together. The 32-byte key comes back over --pipe into the RAM-only keyfile; cryptsetup
+          # (which does need broad privilege) stays in this unit. --wait propagates the scope's exit
+          # so a failed unlock still fails closed.
           ( umask 077
             KEEP_PASSWORD="$(cat "$CREDENTIALS_DIRECTORY/keep-password")" \
-              ${cfg.keepPackage}/bin/keep --path ${lib.escapeShellArg cfg.keepDbPath} frost network oprf-unlock \
-                --group ${lib.escapeShellArg cfg.group} --relay ${lib.escapeShellArg cfg.relay} --share ${toString cfg.shareIndex} \
-                --volume-id ${lib.escapeShellArg cfg.volumeId} --epoch ${toString cfg.epoch} \
-                --tpm-tcti ${lib.escapeShellArg cfg.tpmTcti} \
-                --share-file "$CREDENTIALS_DIRECTORY/oprf-share" \
+              ${systemdRun} --pipe --wait --collect --quiet \
+                -E KEEP_PASSWORD \
+                -p CapabilityBoundingSet= \
+                -p AmbientCapabilities= \
+                -p NoNewPrivileges=yes \
+                -p RuntimeMaxSec=90 \
+                -p SystemCallFilter=@system-service \
+                -p SystemCallArchitectures=native \
+                -p RestrictAddressFamilies="AF_UNIX AF_NETLINK AF_INET AF_INET6" \
+                -p RestrictNamespaces=yes \
+                -p LockPersonality=yes \
+                -p MemoryDenyWriteExecute=yes \
+                -p RestrictRealtime=yes \
+                -p RestrictSUIDSGID=yes \
+                -p ProtectKernelTunables=yes \
+                -p ProtectKernelModules=yes \
+                -p ProtectKernelLogs=yes \
+                -p ProtectControlGroups=yes \
+                -p ProtectHostname=yes \
+                -p InaccessiblePaths="-/run/systemd/private -/run/dbus/system_bus_socket" \
+                -p ProtectProc=invisible \
+                -p ProcSubset=pid \
+                -- ${cfg.keepPackage}/bin/keep --path ${lib.escapeShellArg cfg.keepDbPath} frost network oprf-unlock \
+                  --group ${lib.escapeShellArg cfg.group} --relay ${lib.escapeShellArg cfg.relay} --share ${toString cfg.shareIndex} \
+                  --volume-id ${lib.escapeShellArg cfg.volumeId} --epoch ${toString cfg.epoch} \
+                  --tpm-tcti ${lib.escapeShellArg cfg.tpmTcti} \
+                  --share-file "$sharef" \
                 > "$keyf" )
           cryptsetup open --key-file "$keyf" --keyfile-size 32 "$dev" "$mapper"
-          rm -f "$keyf"
+          rm -f "$keyf" "$sharef"
         fi
       else
         # Our LUKS label but no OPRF completion marker: never provisioned for OPRF (or an
