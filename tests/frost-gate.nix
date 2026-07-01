@@ -175,7 +175,12 @@
     # The gate refuses to destroy the provisioned-but-unrecoverable volume: its unit fails closed,
     # and for THIS reason (the refuse-to-reformat path), not some unrelated abort.
     node.wait_until_succeeds("systemctl is-failed --quiet keep-node-frost-gate.service")
-    node.succeed("journalctl -u keep-node-frost-gate.service | grep -q 'refusing to reformat'")
+    # wait_until (not a bare grep): the unit can enter the failed state a moment before its final
+    # log line is flushed to the journal, which occasionally raced the grep. A genuinely wrong
+    # failure path still fails here (the line never appears), just after the retry window.
+    node.wait_until_succeeds(
+        "journalctl -u keep-node-frost-gate.service | grep -q 'refusing to reformat'"
+    )
     node.fail("test -e /dev/mapper/keep-vault")  # not unlocked
     node.fail("systemctl is-active --quiet vaultwarden.service")  # vault stays down (hard dep)
     # The volume was NOT reformatted: our LUKS container, label, and completion marker all survive.
