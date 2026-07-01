@@ -10,6 +10,12 @@
 # fail2ban jail that bans IPs after repeated FAILED logins (the brute-force defense; nginx's blanket
 # rate limit cannot tell a failed login from a legitimate token refresh, so fail2ban watches the
 # Vaultwarden log instead).
+#
+# WARNING: this ingress must be the direct network edge for the client, i.e. nginx must see the real
+# client IP in $remote_addr. The per-IP rate limit and the fail2ban brute-force ban both key on that
+# address. If it is placed behind a CDN, reverse proxy, or load balancer, $remote_addr is the proxy's
+# IP: rate limiting collapses to per-proxy (no per-client protection) and fail2ban bans the proxy
+# (self-DoS). There is deliberately no set_real_ip_from/real_ip_header trusted-proxy config here.
 {
   config,
   lib,
@@ -21,7 +27,12 @@ let
 in
 {
   options.keepNode.ingress = {
-    enable = lib.mkEnableOption "TLS-terminating nginx ingress in front of Vaultwarden";
+    enable = lib.mkEnableOption ''
+      TLS-terminating nginx ingress in front of Vaultwarden. This must be the direct network edge:
+      nginx must see the real client IP in $remote_addr, since the per-IP rate limit and fail2ban
+      brute-force ban key on it. Behind a CDN/reverse-proxy/load balancer $remote_addr is the
+      proxy's IP, which breaks per-IP rate limiting and makes fail2ban ban the proxy (self-DoS)
+    '';
 
     hostName = lib.mkOption {
       type = lib.types.str;
@@ -30,15 +41,24 @@ in
     };
 
     tlsCertFile = lib.mkOption {
-      type = lib.types.nullOr lib.types.path;
+      type = lib.types.nullOr lib.types.str;
       default = null;
-      description = "PEM certificate (chain) for hostName. Required unless useACME is set.";
+      description = ''
+        Absolute path string to the PEM certificate (chain) for hostName on the target host
+        (e.g. "/var/lib/secrets/vault-cert.pem"). Required unless useACME is set. Must be a path
+        string, not a Nix-path literal, so it is never copied into the world-readable Nix store.
+      '';
     };
 
     tlsKeyFile = lib.mkOption {
-      type = lib.types.nullOr lib.types.path;
+      type = lib.types.nullOr lib.types.str;
       default = null;
-      description = "PEM private key for tlsCertFile. Required unless useACME is set.";
+      description = ''
+        Absolute path string to the PEM private key for tlsCertFile on the target host
+        (e.g. "/var/lib/secrets/vault-key.pem"). Required unless useACME is set. Must be a path
+        string, not a Nix-path literal, so the private key is never copied into the
+        world-readable Nix store.
+      '';
     };
 
     useACME = lib.mkOption {
@@ -100,7 +120,6 @@ in
       # Per-IP rate-limit zone for the auth/admin endpoints (DoS guard; brute-force is fail2ban's job).
       appendHttpConfig = ''
         limit_req_zone $binary_remote_addr zone=keepauth:10m rate=${toString cfg.authRatePerMinute}r/m;
-        map $http_upgrade $connection_upgrade { default upgrade; "" close; }
       '';
 
       virtualHosts.${cfg.hostName} = {

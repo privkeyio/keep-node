@@ -29,7 +29,10 @@ in
         tlsKeyFile = "${cert}/key.pem";
       };
 
-      environment.systemPackages = [ pkgs.curl ];
+      environment.systemPackages = [
+        pkgs.curl
+        pkgs.fail2ban
+      ];
     };
 
   testScript = ''
@@ -52,6 +55,14 @@ in
     # The brute-force jail is loaded and watching the Vaultwarden journal.
     node.wait_for_unit("fail2ban.service")
     node.succeed("fail2ban-client status keep-vaultwarden")
+
+    # The failregex actually matches a real Vaultwarden failed-login line. This is the fragile,
+    # security-critical piece: if Vaultwarden's message drifts the ban control fails open silently.
+    logline = "Username or password is incorrect. Try again. IP: 203.0.113.7. Username: alice@example.com."
+    out = node.succeed(
+        f"fail2ban-regex '{logline}' /etc/fail2ban/filter.d/keep-vaultwarden.conf"
+    )
+    assert "1 matched" in out, f"expected exactly one failregex match, got:\n{out}"
 
     # Port 80 is open and redirects to HTTPS (forceSSL), not served plaintext.
     node.succeed(
