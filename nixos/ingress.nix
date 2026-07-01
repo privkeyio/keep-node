@@ -24,6 +24,7 @@
 let
   cfg = config.keepNode.ingress;
   vwPort = config.keepNode.vaultwarden.port;
+  vwUpstream = "http://127.0.0.1:${toString vwPort}";
 in
 {
   options.keepNode.ingress = {
@@ -134,20 +135,20 @@ in
 
         locations = {
           "/" = {
-            proxyPass = "http://127.0.0.1:${toString vwPort}";
+            proxyPass = vwUpstream;
           };
           # Vaultwarden's live-sync hub is a WebSocket; it needs the Upgrade headers.
           "/notifications/hub" = {
-            proxyPass = "http://127.0.0.1:${toString vwPort}";
+            proxyPass = vwUpstream;
             proxyWebsockets = true;
           };
           # Rate-limit the password/token endpoint and the admin panel against floods.
           "/identity/connect/token" = {
-            proxyPass = "http://127.0.0.1:${toString vwPort}";
+            proxyPass = vwUpstream;
             extraConfig = "limit_req zone=keepauth burst=10 nodelay;";
           };
           "/admin" = {
-            proxyPass = "http://127.0.0.1:${toString vwPort}";
+            proxyPass = vwUpstream;
             extraConfig = "limit_req zone=keepauth burst=5 nodelay;";
           };
         };
