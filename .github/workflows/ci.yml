@@ -31,13 +31,33 @@ jobs:
           checks=$(nix eval --json '.#checks.x86_64-linux' --apply builtins.attrNames)
           echo "checks=$checks" >> "$GITHUB_OUTPUT"
 
+  # Build the expensive shared packages ONCE and populate the cache. keep-cli (tpm-attestation +
+  # bindgen) is a ~10min Rust build that single-node/oprf-unlock depend on. This job is the SOLE
+  # cache saver: the per-check jobs below get an exact-key hit and therefore skip saving, so a fast
+  # check (e.g. formatting, which never builds keep-cli) can't win the save race and poison the
+  # shared cache with a keep-cli-less store, which is what forced oprf-unlock to cold-rebuild
+  # keep-cli (~12min). On an unchanged keep pin this restores keep-cli instead of rebuilding it.
+  warm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25
+      - name: Nix store cache
+        uses: nix-community/cache-nix-action@v6
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock', '**/*.nix') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+      - name: Build shared packages
+        run: nix build -L .#packages.x86_64-linux.keep-web .#packages.x86_64-linux.keep-cli
+
   # One check per job, isolated on its own runner. The suite includes several heavy QEMU guests
   # (the oprf-unlock 3-VM quorum and the OVMF/UKI measured-boot + measured-seal tests); running
   # them concurrently in a single `nix flake check` starved the runner and intermittently timed a
   # test out (an unrelated Vaultwarden crash-looping). Giving each check its own runner removes the
   # contention and keeps wall-clock ≈ the slowest single test regardless of suite size.
   check:
-    needs: discover
+    needs: [discover, warm]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -80,7 +100,9 @@ jobs:
         # Pinned to a full commit SHA (v22) so CI never runs a mutable upstream ref.
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25
 
-      # Cache /nix/store so keep-web/keep-cli (built from privkeyio/keep) aren't recompiled every run.
+      # Restore the /nix/store cache the `warm` job populated (same key -> exact hit), so keep-web/
+      # keep-cli are reused, not rebuilt. An exact hit also makes cache-nix-action skip the post-run
+      # save, so these parallel jobs never race to overwrite the shared cache (the poisoning fix).
       - name: Nix store cache
         uses: nix-community/cache-nix-action@v6
         with:
