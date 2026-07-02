@@ -47,6 +47,10 @@
         pkgs.cryptsetup
       ];
       virtualisation.tpm.enable = true; # swtpm -> /dev/tpmrm0
+      # Create the tss group and set /dev/tpmrm0 to tss:0660 (udev), so the non-root confined unlock
+      # (step 5b, keep-node-5y0) can reach the TPM via SupplementaryGroups=tss. Root (the every-boot
+      # path) is unaffected. This is the same requirement a non-root frost-gate scope would carry.
+      security.tpm2.enable = true;
       networking.firewall.enable = false;
       networking.extraHosts = "${nodes.relay.networking.primaryIPAddress} relay.kfp";
     };
@@ -180,13 +184,21 @@
         f"--attestation-config /root/policy.toml",
     )
 
+    # The invariant oprf-unlock args shared verbatim by every unlock call site below (steps 5, 5b, 6),
+    # defined once so the group/relay/share/volume/TPM binding stays in lockstep. Each site keeps its
+    # own explicit prefix (keep binary + --path, any confinement/timeout wrapper), --share-file, and
+    # redirect target -- the parts that legitimately differ per site.
+    oprf_unlock_args = (
+        f"frost network oprf-unlock --group {npub} --relay {relay_url} "
+        f"--share 1 --volume-id vault0 --tpm-tcti device:/dev/tpmrm0"
+    )
+
     # --- 5. Box requests a 2-of-2 unlock; the reconstructed key must match. ---
     # The unlock is a read-only reconstruction, so retry until it yields the key, writing it to a
     # file we read back.
     box.wait_until_succeeds(
-        f"{env} {keep} --no-mlock --path /root/box frost network oprf-unlock "
-        f"--group {npub} --relay {relay_url} --share 1 --volume-id vault0 "
-        f"--share-file /root/box-oprf.share --tpm-tcti device:/dev/tpmrm0 "
+        f"{env} {keep} --no-mlock --path /root/box {oprf_unlock_args} "
+        f"--share-file /root/box-oprf.share "
         f"> /root/unlocked.bin",
         timeout=120,
     )
@@ -195,15 +207,69 @@
     assert len(provisioned) == 64, f"expected a 32-byte LUKS key, got {provisioned!r}"
     assert unlocked == provisioned, f"unlock key {unlocked!r} != provisioned {provisioned!r}"
 
+    # --- 5b. Non-root confined unlock (keep-node-5y0). The frost-gate runs `keep oprf-unlock` (the
+    # relay-response parser) inside a transient systemd-run scope. wlc already drops all caps there,
+    # but it still runs as uid 0, so a compromised parser can read any root-owned secret via DAC.
+    # Prove the SAME real unlock succeeds as a dedicated UNPRIVILEGED user under that confinement, so
+    # the frost-gate scope can drop to non-root. This surfaces exactly what a non-root uid needs:
+    # (a) the keep DB on a path it can traverse -- /root is 0700, so relocate a copy to /var/lib;
+    # (b) ownership of that DB (keep unlocks + writes its Argon2 vault there) and the OPRF share;
+    # (c) the tss group for the TPM (/dev/tpmrm0) the box quotes with. The holder is still serving.
+    box.succeed("useradd --system --user-group keepunlock")
+    box.succeed(
+        "install -d -o keepunlock -g keepunlock -m 0750 /var/lib/keepunlock && "
+        "cp -a /root/box /var/lib/keepunlock/db && "
+        "cp /root/box-oprf.share /var/lib/keepunlock/oprf.share && "
+        "chown -R keepunlock:keepunlock /var/lib/keepunlock && "
+        "chmod 0400 /var/lib/keepunlock/oprf.share"
+    )
+    # The `-p` set below MIRRORS the production frost-gate scope (nixos/frost-gate.nix:180-209)
+    # so this test exercises the real confinement dropping to non-root, not a weaker copy. The one
+    # deliberate deviation: NO RuntimeMaxSec=90. The unlock is wrapped in wait_until_succeeds(timeout=120)
+    # and a per-invocation 90s hard kill under a loaded CI VM would cause spurious flakes unrelated to
+    # confinement. User=keepunlock + SupplementaryGroups=tss are added on top of the production flags.
+    # NOTE: this is a second real OPRF unlock from the same box FROST identity as step 5; it assumes
+    # both fall within the holder's per-requester auto-approve rate-limit window (they have to date).
+    box.wait_until_succeeds(
+        f"{env} systemd-run --pipe --wait --collect --quiet "
+        f"-p User=keepunlock -p SupplementaryGroups=tss "
+        f"-p CapabilityBoundingSet= -p AmbientCapabilities= "
+        f"-p NoNewPrivileges=yes -p SystemCallFilter=@system-service "
+        f"-p SystemCallArchitectures=native "
+        f"-p RestrictAddressFamilies='AF_UNIX AF_NETLINK AF_INET AF_INET6' "
+        f"-p RestrictNamespaces=yes -p LockPersonality=yes -p MemoryDenyWriteExecute=yes "
+        f"-p RestrictRealtime=yes -p RestrictSUIDSGID=yes "
+        f"-p ProtectKernelTunables=yes -p ProtectKernelModules=yes -p ProtectKernelLogs=yes "
+        f"-p ProtectControlGroups=yes -p ProtectHostname=yes "
+        f"-p InaccessiblePaths='-/run/systemd/private -/run/dbus/system_bus_socket' "
+        f"-p ProtectProc=invisible -p ProcSubset=pid "
+        f"-E KEEP_PASSWORD -E KEEP_YES -E KEEP_ALLOW_WS -E KEEP_PEER_ANNOUNCE_INTERVAL_SECS "
+        f"{keep} --no-mlock --path /var/lib/keepunlock/db {oprf_unlock_args} "
+        f"--share-file /var/lib/keepunlock/oprf.share "
+        f"> /root/nonroot-unlocked.bin",
+        timeout=120,
+    )
+    nonroot = box.succeed("od -An -v -tx1 /root/nonroot-unlocked.bin | tr -d ' \\n'").strip()
+    assert nonroot == provisioned, f"non-root unlock {nonroot!r} != provisioned {provisioned!r}"
+
+    # Prove the DAC boundary that MOTIVATES step 5b: keepunlock is a distinct unprivileged uid, so it
+    # must NOT be able to read the root-owned secrets a compromised uid-0 parser could. /root/luks.key
+    # (the provisioned key) and /root/box (the keep DB) live under 0700 root:root /root; runuser (from
+    # util-linux) drops to keepunlock and every read must be refused. Assert root ownership first so a
+    # failing read is a real DAC denial, not a false pass on a missing/renamed path.
+    box.succeed("test \"$(stat -c %U /root/luks.key)\" = root")
+    box.succeed("test \"$(stat -c '%U %a' /root)\" = 'root 700'")
+    box.fail("runuser -u keepunlock -- cat /root/luks.key")
+    box.fail("runuser -u keepunlock -- ls /root/box")
+
     # --- 6. Below threshold: with the lone holder offline the box holds a single share
     # (< threshold 2), so the unlock must FAIL CLOSED and never reconstruct the key. ---
     holder.succeed("systemctl stop holder-serve2.service")
     # `timeout` bounds a hung quorum wait, so a never-answered request fails closed here
     # rather than stalling the test forever.
     box.fail(
-        f"{env} timeout 30 {keep} --no-mlock --path /root/box frost network oprf-unlock "
-        f"--group {npub} --relay {relay_url} --share 1 --volume-id vault0 "
-        f"--share-file /root/box-oprf.share --tpm-tcti device:/dev/tpmrm0 "
+        f"{env} timeout 30 {keep} --no-mlock --path /root/box {oprf_unlock_args} "
+        f"--share-file /root/box-oprf.share "
         f"> /root/neg-unlock.out 2>/root/neg-unlock.err"
     )
     # ...and it emitted no usable key material: a failed unlock must not leak a 32-byte key.
