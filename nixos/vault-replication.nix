@@ -207,6 +207,63 @@ in
           ReadWritePaths = [ dataDir ];
         };
       };
+
+      # Litestream replicates ONLY db.sqlite3, never the attachment/Send files it references
+      # (attachments/<cipher>/<id>, sends/<id> -- E2E ciphertext on disk). A separate periodic sync
+      # mirrors those into the same replica dir so a promoted standby has the files a restored row
+      # points at. Runs on a short timer AHEAD of / alongside the ~1s DB stream: two async
+      # replicators cannot give atomic file-before-row, so this is bounded eventual consistency (the
+      # design doc permits it) -- the window where a row is restored before its file is small and
+      # self-heals on the next sync.
+      systemd.services.keep-node-vault-files = {
+        description = "Replicate Vaultwarden attachments + Sends (multi-node HA)";
+        after = [
+          "vaultwarden.service"
+          "keep-node-frost-gate.service"
+        ];
+        requires = [ "vaultwarden.service" ] ++ lib.optional gateEnabled "keep-node-frost-gate.service";
+        serviceConfig = {
+          Type = "oneshot";
+          User = "vaultwarden";
+          Group = "vaultwarden";
+          # Same fail-closed guard as the DB replica: never mirror the (E2E-ciphertext, but still
+          # sensitive) files onto unencrypted disk when the gate failed to mount. `+` runs it on the
+          # host mount table, outside the sandbox's dataDir bind-mount. Mirrors keep-node-litestream.
+          ExecStartPre = lib.optional gateEnabled (
+            "+"
+            + pkgs.writeShellScript "keep-node-vault-files-mount-guard" ''
+              set -euo pipefail
+              if ! ${pkgs.util-linux}/bin/mountpoint -q ${lib.escapeShellArg dataDir}; then
+                echo "keep-node-vault-files: ${dataDir} is not a mountpoint (FROST volume not mounted); refusing to mirror vault files to unencrypted disk" >&2
+                exit 1
+              fi
+            ''
+          );
+          ExecStart = pkgs.writeShellScript "keep-node-vault-files-sync" ''
+            set -euo pipefail
+            install -d -m 0700 ${lib.escapeShellArg cfg.litestream.replicaDir}
+            for sub in attachments sends; do
+              # Vaultwarden creates these only on first attachment/Send; mkdir so rsync never errors
+              # on a missing source, and --delete so a file removed on the active is removed here too.
+              mkdir -p ${lib.escapeShellArg dataDir}/"$sub" ${lib.escapeShellArg cfg.litestream.replicaDir}/"$sub"
+              ${pkgs.rsync}/bin/rsync -a --delete ${lib.escapeShellArg dataDir}/"$sub"/ ${lib.escapeShellArg cfg.litestream.replicaDir}/"$sub"/
+            done
+          '';
+          NoNewPrivileges = true;
+          ProtectSystem = "strict";
+          ProtectHome = true;
+          PrivateTmp = true;
+          ReadWritePaths = [ dataDir ];
+        };
+      };
+      systemd.timers.keep-node-vault-files = {
+        wantedBy = [ "timers.target" ];
+        timerConfig = {
+          OnBootSec = "20s";
+          OnUnitActiveSec = "15s";
+          Unit = "keep-node-vault-files.service";
+        };
+      };
     })
   ];
 }

@@ -107,7 +107,19 @@
     nodeA.succeed("sleep 4")
     nodeA.succeed("test -n \"$(ls -A /var/lib/vaultwarden/replica 2>/dev/null)\"")
 
-    # Transport stand-in: copy the replica to the peer (real deploy: over the mesh).
+    # --- Attachment/Send file replication (M1 PR3): Litestream ships only the DB, so a separate
+    # sync mirrors the attachment/Send FILES a restored row points at. Drop a probe attachment (as
+    # the vaultwarden user, like Vaultwarden would) and run the file-sync; it must land in the same
+    # replica the DB stream uses, so the copy below carries DB + files together. ---
+    nodeA.succeed(
+        "install -d -o vaultwarden -g vaultwarden -m 0700 /var/lib/vaultwarden/attachments/probe-cipher && "
+        "echo 'attach-marker' > /tmp/probe-file && install -o vaultwarden -g vaultwarden -m 0600 "
+        "/tmp/probe-file /var/lib/vaultwarden/attachments/probe-cipher/probe-file"
+    )
+    nodeA.systemctl("start keep-node-vault-files.service")
+    nodeA.succeed("test -f /var/lib/vaultwarden/replica/attachments/probe-cipher/probe-file")
+
+    # Transport stand-in: copy the replica (DB replica + mirrored files) to the peer.
     replica_b64 = nodeA.succeed("tar -C /var/lib/vaultwarden/replica -cf - . | base64 -w0").strip()
     nodeB.succeed(
         f"mkdir -p /tmp/replica && printf %s '{replica_b64}' | base64 -d | tar -C /tmp/replica -xf -"
@@ -118,6 +130,10 @@
     nodeB.succeed("litestream restore -o /tmp/restored.db file:///tmp/replica")
     restored = nodeB.succeed("sqlite3 /tmp/restored.db 'SELECT x FROM ha_probe'").strip()
     assert restored == "m1-litestream-marker", f"probe did not survive replication: {restored!r}"
+
+    # ...and the probe attachment file rode along, so the standby has the bytes a cipher row references.
+    attach = nodeB.succeed("cat /tmp/replica/attachments/probe-cipher/probe-file").strip()
+    assert attach == "attach-marker", f"attachment did not replicate: {attach!r}"
 
     # --- Gate-enabled leg: the installer's gateEnabled branch, unreached by nodeA/nodeB. ---
 
