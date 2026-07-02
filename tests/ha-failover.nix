@@ -183,6 +183,13 @@
     # The shared key is unchanged by promotion, so JWTs minted on the dead active still verify here.
     assert keyhash(nodeB) == fixture_hash, "promotion altered the shared JWT signing key"
 
+    # No probe-Send assertion here: the --delete test above removed the Send from the replica before
+    # it was delivered to nodeB, so the promoted node correctly has no Send file to serve.
+    # TODO: promotion's replication-resume step (restart keep-node-litestream + vault-files after the
+    # swap) is unit-tested logic gated on litestream.enable; nodeB runs litestream disabled, so this
+    # harness does not exercise the resume path. Covering it would need nodeB reconfigured with
+    # litestream enabled, which risks flakiness against the existing gate-off assertions above.
+
     # --- Gate-enabled leg: the installer's gateEnabled branch, unreached by nodeA/nodeB. ---
 
     # Healthy unlock: the gate provisions + mounts the LUKS volume, THEN the installer's mountpoint

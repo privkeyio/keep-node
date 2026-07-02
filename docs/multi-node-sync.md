@@ -13,7 +13,10 @@
 > (`keep-node-vault-promote` , an operator-triggered unit that restores the vault DB + files from
 > the delivered replica and starts Vaultwarden, so a standby takes over the failed active's data with
 > sessions intact because the JWT key is shared). The `ha-failover` test crashes the active and
-> asserts the promoted node serves the replicated row + attachment.
+> asserts the promoted node serves the replicated row + attachment. Promotion does NOT fence the
+> failed active, and because the JWT signing key is shared cluster-wide, an old active that comes
+> back can mint tokens the promoted node accepts and resume writing (split-brain), so the operator
+> runbook must ensure the old active stays down before promoting.
 > Still to come: the cross-node **transport** (everything lands the replica locally today; the test
 > stubs the hop with a copy , the real deploy ships it over the encrypted mesh, which does not exist
 > yet), and a **replication-lag** signal.
