@@ -119,6 +119,16 @@ it cannot decrypt the vault, derive the volume key, or sign. Vaultwarden is boun
 localhost and never serves plaintext HTTP on the LAN; remote access is over the encrypted
 transport, which terminates to loopback.
 
+Because the box reconstructs its volume key by parsing responses from that untrusted relay,
+that parser is a semi-trusted-input attack surface. The gate does not run it inline in the
+privileged unit that drives cryptsetup and the mount: the every-boot `keep oprf-unlock` runs
+in a tightly-confined transient scope, as a dedicated unprivileged user with an empty
+capability set, no-new-privileges, a `@system-service` syscall filter, `MemoryDenyWriteExecute`,
+and no access to the PID1/D-Bus control sockets. A memory-safety or logic bug handling a
+malicious relay response therefore cannot escalate to root or read the box's other secrets
+(it reaches only its own FROST-share database, the TPM device, and the relay socket); the
+reconstructed 32-byte key returns over a pipe to the privileged unit that opens the volume.
+
 Inter-node replication (the planned multi-node HA) is held to the same rule: nodes replicate
 each other's encrypted state only, never plaintext and never an at-or-above-threshold set of
 shares, so a node or its sync path can degrade availability but cannot decrypt another node's
