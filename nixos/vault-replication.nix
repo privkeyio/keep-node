@@ -19,6 +19,23 @@ let
   # Whether the FROST gate encrypts this data dir. When it does, the shared signing key must only
   # be written after the LUKS volume is mounted, never onto the unencrypted root fs.
   gateEnabled = config.keepNode.frostGate.enable or false;
+  # Fail-closed mount guard shared by the litestream + vault-files replicators. On a gated node it
+  # refuses to run unless the FROST LUKS volume is actually mounted at dataDir, so a failed unlock
+  # never persists vault data on unencrypted disk. The `+` prefix runs it OUTSIDE the unit's mount
+  # namespace: ProtectSystem/ReadWritePaths bind-mounts dataDir inside the sandbox, so an in-namespace
+  # `mountpoint` would read as mounted even when the LUKS volume is absent; running on the host mount
+  # table makes the check real. Uses an absolute mountpoint path since `+` execs do not get the unit
+  # `path`. Callers wrap this in `lib.optional gateEnabled`.
+  mkMountGuard =
+    { name, msg }:
+    "+"
+    + pkgs.writeShellScript name ''
+      set -euo pipefail
+      if ! ${pkgs.util-linux}/bin/mountpoint -q ${lib.escapeShellArg dataDir}; then
+        echo ${lib.escapeShellArg msg} >&2
+        exit 1
+      fi
+    '';
 in
 {
   options.keepNode.vaultReplication = {
@@ -134,10 +151,15 @@ in
           # Unconditional: on a gated node this keeps the replica on the encrypted volume, and in all
           # cases it keeps replicaDir inside the unit's single ReadWritePaths entry (dataDir) so the
           # sandbox can write it. Reject `/../` so the string prefix can't be escaped off the mount.
+          # Also reject replicaDir under the two synced subtrees (attachments/, sends/): the file sync
+          # rsyncs those INTO replicaDir, so a replicaDir inside either would recurse into itself and
+          # fill the disk.
           assertion =
             lib.hasPrefix "${dataDir}/" cfg.litestream.replicaDir
-            && !lib.hasInfix "/../" cfg.litestream.replicaDir;
-          message = "keepNode.vaultReplication.litestream.replicaDir must live under ${dataDir} (it is set to ${cfg.litestream.replicaDir}) so the replica inherits the vault data dir's encryption and the service sandbox can create it.";
+            && !lib.hasInfix "/../" cfg.litestream.replicaDir
+            && !lib.hasPrefix "${dataDir}/attachments" cfg.litestream.replicaDir
+            && !lib.hasPrefix "${dataDir}/sends" cfg.litestream.replicaDir;
+          message = "keepNode.vaultReplication.litestream.replicaDir must live under ${dataDir}, but not under ${dataDir}/attachments or ${dataDir}/sends (it is set to ${cfg.litestream.replicaDir}), so the replica inherits the vault data dir's encryption, the service sandbox can create it, and the file sync does not rsync a synced subtree into itself.";
         }
       ];
 
@@ -172,21 +194,12 @@ in
           ExecStartPre =
             # Defense in depth beside the `requires` above: only write the replica onto the mounted,
             # encrypted volume. If the gate "succeeded" without mounting, fail closed rather than
-            # reconstruct the vault DB on the unencrypted root fs. The `+` prefix runs this guard
-            # OUTSIDE the unit's mount namespace: ProtectSystem/ReadWritePaths bind-mounts dataDir
-            # inside the sandbox, so an in-namespace `mountpoint` would read as mounted even when the
-            # LUKS volume is absent. Running on the host mount table makes the check real. Use an
-            # absolute mountpoint path since `+` execs do not get the unit `path`.
-            lib.optional gateEnabled (
-              "+"
-              + pkgs.writeShellScript "keep-node-litestream-mount-guard" ''
-                set -euo pipefail
-                if ! ${pkgs.util-linux}/bin/mountpoint -q ${lib.escapeShellArg dataDir}; then
-                  echo "keep-node-litestream: ${dataDir} is not a mountpoint (FROST volume not mounted); refusing to write the vault-DB replica to unencrypted disk" >&2
-                  exit 1
-                fi
-              ''
-            )
+            # reconstruct the vault DB on the unencrypted root fs. See mkMountGuard for why the guard
+            # runs `+`-prefixed on the host mount table.
+            lib.optional gateEnabled (mkMountGuard {
+              name = "keep-node-litestream-mount-guard";
+              msg = "keep-node-litestream: ${dataDir} is not a mountpoint (FROST volume not mounted); refusing to write the vault-DB replica to unencrypted disk";
+            })
             # vaultwarden.service's StateDirectory creates dataDir at 0700; pre-create the replica
             # subdir 0700 so Litestream never widens it (it would create 0755). This runs as the
             # vaultwarden user (no `+` prefix), so the dir is vaultwarden-owned without a chown.
@@ -211,10 +224,10 @@ in
       # Litestream replicates ONLY db.sqlite3, never the attachment/Send files it references
       # (attachments/<cipher>/<id>, sends/<id> -- E2E ciphertext on disk). A separate periodic sync
       # mirrors those into the same replica dir so a promoted standby has the files a restored row
-      # points at. Runs on a short timer AHEAD of / alongside the ~1s DB stream: two async
-      # replicators cannot give atomic file-before-row, so this is bounded eventual consistency (the
-      # design doc permits it) -- the window where a row is restored before its file is small and
-      # self-heals on the next sync.
+      # points at. It runs on its own timer (OnUnitActiveSec below), independent of the ~1s DB stream:
+      # two async replicators cannot give atomic file-before-row, so this is bounded eventual
+      # consistency (the design doc permits it) -- a row can be restored up to one timer interval
+      # (~15s) ahead of its file, and the gap self-heals on the next sync.
       systemd.services.keep-node-vault-files = {
         description = "Replicate Vaultwarden attachments + Sends (multi-node HA)";
         after = [
@@ -227,26 +240,37 @@ in
           User = "vaultwarden";
           Group = "vaultwarden";
           # Same fail-closed guard as the DB replica: never mirror the (E2E-ciphertext, but still
-          # sensitive) files onto unencrypted disk when the gate failed to mount. `+` runs it on the
-          # host mount table, outside the sandbox's dataDir bind-mount. Mirrors keep-node-litestream.
-          ExecStartPre = lib.optional gateEnabled (
-            "+"
-            + pkgs.writeShellScript "keep-node-vault-files-mount-guard" ''
-              set -euo pipefail
-              if ! ${pkgs.util-linux}/bin/mountpoint -q ${lib.escapeShellArg dataDir}; then
-                echo "keep-node-vault-files: ${dataDir} is not a mountpoint (FROST volume not mounted); refusing to mirror vault files to unencrypted disk" >&2
-                exit 1
-              fi
-            ''
-          );
+          # sensitive) files onto unencrypted disk when the gate failed to mount. See mkMountGuard.
+          ExecStartPre = lib.optional gateEnabled (mkMountGuard {
+            name = "keep-node-vault-files-mount-guard";
+            msg = "keep-node-vault-files: ${dataDir} is not a mountpoint (FROST volume not mounted); refusing to mirror vault files to unencrypted disk";
+          });
           ExecStart = pkgs.writeShellScript "keep-node-vault-files-sync" ''
             set -euo pipefail
-            install -d -m 0700 ${lib.escapeShellArg cfg.litestream.replicaDir}
+            ${pkgs.coreutils}/bin/install -d -m 0700 ${lib.escapeShellArg cfg.litestream.replicaDir}
+            # --delete makes this node's local dataDir the source of truth: a file absent from dataDir
+            # is deleted from the replica. This unit therefore assumes it runs on the ACTIVE node whose
+            # dataDir is authoritative. Once cross-node transport lands (tracked separately), a standby
+            # receiving peer files into replicaDir while its own dataDir is empty would have them wiped
+            # here; that increment MUST make --delete role-aware before running this on a standby.
             for sub in attachments sends; do
-              # Vaultwarden creates these only on first attachment/Send; mkdir so rsync never errors
-              # on a missing source, and --delete so a file removed on the active is removed here too.
-              mkdir -p ${lib.escapeShellArg dataDir}/"$sub" ${lib.escapeShellArg cfg.litestream.replicaDir}/"$sub"
-              ${pkgs.rsync}/bin/rsync -a --delete ${lib.escapeShellArg dataDir}/"$sub"/ ${lib.escapeShellArg cfg.litestream.replicaDir}/"$sub"/
+              # Vaultwarden creates these only on first attachment/Send; ensure the source exists so
+              # rsync never errors on a missing source, but with mkdir (not install -m) so we never
+              # re-chmod Vaultwarden's own live directory -- replication must not mutate source mode.
+              ${pkgs.coreutils}/bin/mkdir -p ${lib.escapeShellArg dataDir}/"$sub"
+              # Pre-create the replica subdir at 0700 (the data dir's mode, fail-closed) so rsync -a
+              # never widens it past 0700.
+              ${pkgs.coreutils}/bin/install -d -m 0700 ${lib.escapeShellArg cfg.litestream.replicaDir}/"$sub"
+              # On a live vault Vaultwarden deletes attachments/Sends concurrently, so rsync routinely
+              # exits 24 ("some files vanished during transfer") and occasionally 23 ("partial transfer
+              # due to error"). Both are benign here and self-heal next cycle, so treat them as success;
+              # fail the oneshot only on any other non-zero code.
+              rc=0
+              ${pkgs.rsync}/bin/rsync -a --delete ${lib.escapeShellArg dataDir}/"$sub"/ ${lib.escapeShellArg cfg.litestream.replicaDir}/"$sub"/ || rc=$?
+              case "$rc" in
+                0 | 23 | 24) ;;
+                *) exit "$rc" ;;
+              esac
             done
           '';
           NoNewPrivileges = true;
