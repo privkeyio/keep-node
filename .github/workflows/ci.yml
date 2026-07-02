@@ -46,8 +46,16 @@ jobs:
       - name: Nix store cache
         uses: nix-community/cache-nix-action@v6
         with:
-          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock', '**/*.nix') }}
-          restore-prefixes-first-match: nix-${{ runner.os }}-
+          # Suffix the key with the run id so every run writes a FRESH cache. GitHub cache keys are
+          # immutable: without this, a once-saved incomplete cache (e.g. one a fast check wrote
+          # without keep-cli) can never be replaced, and warm's complete build is silently dropped
+          # ("Lookup only - skipping download"). restore-prefixes then pulls the newest cache for
+          # this .nix hash (the previous run's, which warm made complete), so keep-cli is restored,
+          # not rebuilt. This job is the sole saver; the check jobs share this exact key (below).
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock', '**/*.nix') }}-${{ github.run_id }}
+          restore-prefixes-first-match: |
+            nix-${{ runner.os }}-${{ hashFiles('flake.lock', '**/*.nix') }}-
+            nix-${{ runner.os }}-
       - name: Build shared packages
         run: nix build -L .#packages.x86_64-linux.keep-web .#packages.x86_64-linux.keep-cli
 
@@ -100,14 +108,17 @@ jobs:
         # Pinned to a full commit SHA (v22) so CI never runs a mutable upstream ref.
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25
 
-      # Restore the /nix/store cache the `warm` job populated (same key -> exact hit), so keep-web/
-      # keep-cli are reused, not rebuilt. An exact hit also makes cache-nix-action skip the post-run
-      # save, so these parallel jobs never race to overwrite the shared cache (the poisoning fix).
+      # Restore the /nix/store cache the `warm` job wrote THIS run (same run-id-suffixed key -> exact
+      # hit), so keep-web/keep-cli are reused, not rebuilt. The exact hit also makes cache-nix-action
+      # skip the post-run save, so warm stays the sole saver and these parallel jobs never race to
+      # write (poison) the cache.
       - name: Nix store cache
         uses: nix-community/cache-nix-action@v6
         with:
-          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock', '**/*.nix') }}
-          restore-prefixes-first-match: nix-${{ runner.os }}-
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock', '**/*.nix') }}-${{ github.run_id }}
+          restore-prefixes-first-match: |
+            nix-${{ runner.os }}-${{ hashFiles('flake.lock', '**/*.nix') }}-
+            nix-${{ runner.os }}-
 
       - name: Build check
         run: nix build -L '.#checks.x86_64-linux.${{ matrix.check }}'
