@@ -33,20 +33,26 @@ jobs:
 
   # Build the expensive shared packages once and PUSH them to the `privkey` Cachix binary cache, so
   # the per-check jobs substitute keep-web/keep-cli instead of cold-rebuilding them. keep-cli
-  # (tpm-attestation + bindgen) is a ~10min Rust build that single-node/oprf-unlock depend on and
-  # that is not on cache.nixos.org (it is built from the pinned keep source). Cachix is a real Nix
-  # substituter: it registers store paths validly, unlike the GitHub tar-of-/nix/store cache we
-  # replaced, which restored incompletely (tar permission errors) and forced rebuilds. This is the
-  # SOLE pusher; the check jobs pull anonymously (public cache) and skip pushing, so they never
-  # upload the large per-check VM-test outputs.
+  # (tpm-attestation + bindgen) is a ~10min Rust build that oprf-unlock depends on; keep-web is what
+  # single-node consumes. Neither is on cache.nixos.org (both are built from the pinned keep source).
+  # Cachix is a real Nix substituter: it registers store paths validly, unlike the GitHub
+  # tar-of-/nix/store cache we replaced, which restored incompletely (tar permission errors) and
+  # forced rebuilds. Runs only on `push` to main so the Cachix write token never enters a PR build
+  # (a PR could otherwise exfiltrate it via the build step): PR check jobs pull anonymously from what
+  # main populated and cold-build on a miss. This is the SOLE pusher; check jobs skip pushing, so
+  # they never upload the large per-check VM-test outputs.
   warm:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25
       - name: Cachix (push privkey)
-        uses: cachix/cachix-action@v15
+        # Pinned to a full commit SHA (v15) so CI never runs a mutable upstream ref; this action
+        # handles the write token, so an upstream re-tag must not silently change its code.
+        uses: cachix/cachix-action@ad2ddac53f961de1989924296a1f236fcfbaa4fc
         with:
           name: privkey
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
@@ -60,6 +66,11 @@ jobs:
   # contention and keeps wall-clock ≈ the slowest single test regardless of suite size.
   check:
     needs: [discover, warm]
+    # warm only runs on push (it holds the cache write token) and is skipped on PRs; it can also fail
+    # on a transient Cachix outage. always() keeps the checks running regardless of warm's result —
+    # they pull from the cache and cold-build on a miss — so a skipped/failed warm never blocks the
+    # suite or reports a false green. Still gate on discover, whose matrix output the checks consume.
+    if: ${{ always() && needs.discover.result == 'success' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -106,7 +117,8 @@ jobs:
       # substituted, not rebuilt. Public cache -> no auth needed; skipPush so these jobs never
       # upload their (large, non-reusable) VM-test outputs.
       - name: Cachix (pull privkey)
-        uses: cachix/cachix-action@v15
+        # Pinned to a full commit SHA (v15) so CI never runs a mutable upstream ref.
+        uses: cachix/cachix-action@ad2ddac53f961de1989924296a1f236fcfbaa4fc
         with:
           name: privkey
           skipPush: true
