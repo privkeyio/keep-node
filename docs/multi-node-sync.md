@@ -6,10 +6,13 @@
 > before Vaultwarden starts so a session token minted on the active is accepted by a promoted
 > standby, and, when the FROST gate is on, written only onto the mounted encrypted volume) and
 > **Litestream WAL streaming** of `db.sqlite3` (`keepNode.vaultReplication.litestream.enable` , the
-> active continuously ships the vault DB's write-ahead log to a replica a peer can restore).
-> Still to come: the cross-node **transport** (both land the replica locally today; the test stubs
-> the hop with a copy , the real deploy ships it over the encrypted mesh, which does not exist yet),
-> **attachment/Send file replication**, **promotion/failover**, and a **replication-lag** signal.
+> active continuously ships the vault DB's write-ahead log to a replica a peer can restore); and
+> **attachment/Send file replication** (a periodic sync mirrors the `attachments/`+`sends/` files
+> Litestream does not carry into the same replica dir , bounded eventual consistency, since two
+> async replicators cannot give atomic file-before-row).
+> Still to come: the cross-node **transport** (everything lands the replica locally today; the test
+> stubs the hop with a copy , the real deploy ships it over the encrypted mesh, which does not exist
+> yet), **promotion/failover**, and a **replication-lag** signal.
 > This chapter inventories Vaultwarden's state and the constraints that design has to respect.
 
 Vaultwarden (1.36.x here) keeps its state under one data directory, the FROST-gated LUKS

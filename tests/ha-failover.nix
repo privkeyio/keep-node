@@ -107,7 +107,40 @@
     nodeA.succeed("sleep 4")
     nodeA.succeed("test -n \"$(ls -A /var/lib/vaultwarden/replica 2>/dev/null)\"")
 
-    # Transport stand-in: copy the replica to the peer (real deploy: over the mesh).
+    # --- Attachment/Send file replication (M1 PR3): Litestream ships only the DB, so a separate
+    # sync mirrors the attachment/Send FILES a restored row points at. Drop a probe attachment AND a
+    # probe Send (as the vaultwarden user, like Vaultwarden would) and run the file-sync; both must
+    # land in the same replica the DB stream uses, so the copy below carries DB + files together. ---
+    nodeA.succeed(
+        "install -d -o vaultwarden -g vaultwarden -m 0700 /var/lib/vaultwarden/attachments/probe-cipher && "
+        "echo 'attach-marker' > /tmp/probe-file && install -o vaultwarden -g vaultwarden -m 0600 "
+        "/tmp/probe-file /var/lib/vaultwarden/attachments/probe-cipher/probe-file"
+    )
+    nodeA.succeed(
+        "install -d -o vaultwarden -g vaultwarden -m 0700 /var/lib/vaultwarden/sends && "
+        "echo 'send-marker' > /tmp/probe-send && install -o vaultwarden -g vaultwarden -m 0600 "
+        "/tmp/probe-send /var/lib/vaultwarden/sends/probe-send"
+    )
+    nodeA.systemctl("start keep-node-vault-files.service")
+    nodeA.succeed("test -f /var/lib/vaultwarden/replica/attachments/probe-cipher/probe-file")
+    # Sends live directly under sends/<id>, not a per-cipher subdir like attachments; both subtrees
+    # must mirror, so a promoted standby has the bytes behind a Send row as well as an attachment.
+    nodeA.succeed("test -f /var/lib/vaultwarden/replica/sends/probe-send")
+
+    # --delete propagation: a file removed on the active must be removed from the replica on the next
+    # sync, or a promoted standby would resurrect an attachment/Send the user already deleted. Remove
+    # the probe Send, re-run the sync, and assert it is gone from the replica.
+    nodeA.succeed("rm /var/lib/vaultwarden/sends/probe-send")
+    nodeA.systemctl("start keep-node-vault-files.service")
+    nodeA.fail("test -e /var/lib/vaultwarden/replica/sends/probe-send")
+
+    # NOTE: the keep-node-vault-files mount-guard (the `+`-prefixed fail-closed check) only exists on
+    # a node that enables BOTH litestream and the FROST gate. In this harness litestream runs on the
+    # gate-off nodeA and the gate runs on `gated` (litestream off), so no node instantiates that unit
+    # under the gate. The RSA-installer guard test below covers the identical guard pattern on the
+    # gated node; wiring litestream onto `gated` just to re-prove it would duplicate that coverage.
+
+    # Transport stand-in: copy the replica (DB replica + mirrored files) to the peer.
     replica_b64 = nodeA.succeed("tar -C /var/lib/vaultwarden/replica -cf - . | base64 -w0").strip()
     nodeB.succeed(
         f"mkdir -p /tmp/replica && printf %s '{replica_b64}' | base64 -d | tar -C /tmp/replica -xf -"
@@ -118,6 +151,10 @@
     nodeB.succeed("litestream restore -o /tmp/restored.db file:///tmp/replica")
     restored = nodeB.succeed("sqlite3 /tmp/restored.db 'SELECT x FROM ha_probe'").strip()
     assert restored == "m1-litestream-marker", f"probe did not survive replication: {restored!r}"
+
+    # ...and the probe attachment file rode along, so the standby has the bytes a cipher row references.
+    attach = nodeB.succeed("cat /tmp/replica/attachments/probe-cipher/probe-file").strip()
+    assert attach == "attach-marker", f"attachment did not replicate: {attach!r}"
 
     # --- Gate-enabled leg: the installer's gateEnabled branch, unreached by nodeA/nodeB. ---
 
