@@ -159,17 +159,19 @@ let
           # On a stop-timeout SIGTERM (or INT) scrub the secrets, then actually terminate rather
           # than resuming: the explicit exit fires the EXIT trap too (idempotent rm -f).
           trap 'rm -f "$keyf" "$sharef"; exit 1' TERM INT
-          install -m 0400 "$CREDENTIALS_DIRECTORY/oprf-share" "$sharef"
+          # Stage the share owned by the unprivileged unlock user (the scope runs as it, and the
+          # scope has no CAP_DAC_OVERRIDE, so it must genuinely own what it reads).
+          install -o keep-oprf-unlock -g keep-oprf-unlock -m 0400 "$CREDENTIALS_DIRECTORY/oprf-share" "$sharef"
           # Run `keep oprf-unlock` in a tightly-sandboxed transient scope, NOT inline. It parses
           # responses from a semi-trusted network relay; inline it would do so in the same privileged
           # unit that runs cryptsetup/dm-crypt/mount. Confining it is strong defense-in-depth: the
-          # scope drops all capabilities, forbids new privileges, filters syscalls to @system-service
-          # (no raw-IO/mount/reboot), bars W+X memory, bounds its own runtime, and blocks the PID1
-          # control + system D-Bus sockets a compromised parser would use to ask an unconfined unit
-          # to re-escalate past the empty capability set. Residual, stated honestly: the scope still
-          # runs as root (uid 0), so an RCE could still DAC-read root-owned files -- full filesystem
-          # confinement / non-root execution (DynamicUser) is a documented follow-up, not yet applied
-          # (it needs VM validation, and DynamicUser interacts with the mounts the gate propagates).
+          # scope runs as the unprivileged keep-oprf-unlock user (not root), drops all capabilities,
+          # forbids new privileges, filters syscalls to @system-service (no raw-IO/mount/reboot), bars
+          # W+X memory, bounds its own runtime, and blocks the PID1 control + system D-Bus sockets a
+          # compromised parser would use to ask an unconfined unit to re-escalate. Running non-root
+          # closes the residual DAC-read surface (a capless root could still read root-owned secrets;
+          # a dropped uid cannot). It reaches only what it is granted: keepDbPath (chowned to it), the
+          # staged share (above), /dev/tpmrm0 (tss group), and the relay socket.
           # The `-p` flags below are deliberately SEPARATE from and MORE confining than the
           # `hardening` attrset above: they add proc/socket/runtime confinement the gate itself can't
           # take (the gate propagates the vault mount and must stay uncapped for cryptsetup) and drop
@@ -181,6 +183,8 @@ let
             KEEP_PASSWORD="$(cat "$CREDENTIALS_DIRECTORY/keep-password")" \
               ${systemdRun} --pipe --wait --collect --quiet \
                 -E KEEP_PASSWORD \
+                ${lib.optionalString cfg.allowInsecureWs "-E KEEP_ALLOW_WS \\\n                "}-p User=keep-oprf-unlock \
+                -p SupplementaryGroups=tss \
                 -p CapabilityBoundingSet= \
                 -p AmbientCapabilities= \
                 -p NoNewPrivileges=yes \
@@ -417,7 +421,13 @@ let
       rm -f "$keyfile" "$sharefile"
       rm -rf "$tmpdir"
     }
-    trap rollback ERR
+    # `rollback; exit 1` (not bare `rollback`): rollback runs `set +e` so its own cleanup can't
+    # abort mid-undo, but that disables errexit for the REST of the script. Without the explicit
+    # exit, a failed step (e.g. `keep oprf-provision` refused the relay) would run rollback, then
+    # fall through the remaining steps with errexit off and reach the "provisioned" marker + a 0
+    # exit -- reporting success for a volume that never formed. Exit non-zero so provisioning fails
+    # closed and the operator sees it.
+    trap 'rollback; exit 1' ERR
     trap cleanup EXIT
 
     # Wrong-device guard: refuse to clobber a device that already holds data we did not create,
@@ -678,9 +688,46 @@ in
         password into the global systemd manager environment.
       '';
     };
+
+    allowInsecureWs = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        Test-only. When true, the boot OPRF-unlock scope forwards `-E KEEP_ALLOW_WS`, which disables
+        keep's ws->wss upgrade (SSRF/TLS) guard on the boot OPRF exchange so the confined scope can
+        talk to a plaintext `ws://` relay. This exists solely so the VM test can run against an
+        in-VM plaintext relay; it MUST never be enabled in production, where the boot exchange must
+        stay over TLS (`wss://`). Left false, the `-E KEEP_ALLOW_WS` flag is absent from the scope
+        entirely and the guard stays on.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
+    # The boot gate runs `keep oprf-unlock` (the relay-response parser) as this dedicated
+    # unprivileged user inside its transient scope (keep-node-5y0), so a compromised parser cannot
+    # DAC-read root-owned secrets even though the parent gate unit is root. A fixed system user (not
+    # DynamicUser) so keepDbPath can be chowned to a known uid below. Needs the tss group for the TPM
+    # quote, and rw on keepDbPath + the staged share (both chowned to it).
+    users.users.keep-oprf-unlock = lib.mkIf (cfg.mode == "oprf") {
+      isSystemUser = true;
+      group = "keep-oprf-unlock";
+      extraGroups = [ "tss" ];
+      description = "keep frost-gate OPRF unlock (confined, non-root)";
+    };
+    users.groups.keep-oprf-unlock = lib.mkIf (cfg.mode == "oprf") { };
+
+    # The non-root scope reaches /dev/tpmrm0 (to attach its measured-boot quote) via the tss group
+    # and udev rules that security.tpm2 installs. mkDefault so a deployment can still override it.
+    security.tpm2.enable = lib.mkIf (cfg.mode == "oprf") (lib.mkDefault true);
+
+    # keep-node-frost-provision writes keepDbPath as root; chown it (recursively, modes untouched)
+    # to the unlock user at boot -- tmpfiles runs before the gate -- so the non-root gate can read
+    # and write its FROST share DB.
+    systemd.tmpfiles.rules = lib.optionals (cfg.mode == "oprf" && cfg.keepDbPath != null) [
+      "Z ${cfg.keepDbPath} - keep-oprf-unlock keep-oprf-unlock - -"
+    ];
+
     # A warning, not an assertion: kernel-enumeration names (/dev/sdb, /dev/vdb) are valid in a VM
     # but on real hardware can re-point at a different disk across reboots/hotplug, and first-boot
     # provisioning would then format the wrong one. Nudge toward a stable path without breaking the
@@ -753,6 +800,40 @@ in
           || (config.keepNode.measuredBoot.enable or false);
         message = "keepNode.frostGate.sealPcrs includes PCR 11, but PCR 11 is only measured when the box boots a Unified Kernel Image. Enable measured boot (keepNode.measuredBoot.enable = true) or remove 11 from sealPcrs; otherwise the seal binds an unpopulated PCR 11 and the next boot fails closed.";
       }
+      {
+        # The boot gate reaches /dev/tpmrm0 (to attach its measured-boot quote) via the tss group and
+        # the udev rules that security.tpm2 installs; the non-root unlock scope is a member of tss and
+        # depends on that node existing at tss:0660. The mkDefault above turns tpm2 on by default, but
+        # another module can still explicitly set security.tpm2.enable = false, which silently strips
+        # the tss group and the /dev/tpmrm0 udev rules -- then every boot unlock fails closed with no
+        # eval-time signal. Catch that override here rather than at 3am on the appliance.
+        assertion = cfg.mode != "oprf" || config.security.tpm2.enable;
+        message = "keepNode.frostGate.mode = \"oprf\" requires security.tpm2.enable = true: the non-root unlock scope reaches /dev/tpmrm0 for its measured-boot quote via the tss group and udev rules that security.tpm2 provides. Some module set security.tpm2.enable = false, which strips both and makes every boot unlock fail closed.";
+      }
+      {
+        # tmpfiles recursively chowns cfg.keepDbPath (the `Z` rule) to the network-facing
+        # keep-oprf-unlock user so the non-root gate can read/write its FROST share DB. If an operator
+        # ever nests the TPM-sealed cred blobs (oprfShareCred / keepPasswordCred) UNDER keepDbPath (or
+        # points keepDbPath at a cred's parent), that recursive chown hands ownership of the sealed
+        # creds to the unprivileged, relay-facing user -- a parser-RCE in the unlock scope could then
+        # rewrite them and reseal an attacker-chosen share. Keep the DB tree strictly disjoint from the
+        # cred paths. The cred options may be null outside oprf mode, so guard each before testing.
+        # keepDbPath itself may be null (a separate requires-assertion above already reports that with
+        # a clean message); short-circuit on it here so this check never forces `norm null` into an
+        # opaque string-coercion throw that would mask the clearer error.
+        assertion =
+          cfg.mode != "oprf"
+          || cfg.keepDbPath == null
+          || (
+            let
+              norm = p: if lib.hasSuffix "/" p then p else p + "/";
+              db = norm cfg.keepDbPath;
+              nested = c: c != null && (lib.hasPrefix db (norm c) || lib.hasPrefix (norm c) db);
+            in
+            !(nested cfg.oprfShareCred) && !(nested cfg.keepPasswordCred)
+          );
+        message = "keepNode.frostGate.keepDbPath must be disjoint from oprfShareCred and keepPasswordCred in mode = \"oprf\": the module recursively chowns keepDbPath to the unprivileged, relay-facing keep-oprf-unlock user, so nesting the TPM-sealed cred blobs under keepDbPath (or vice versa) would transfer ownership of the sealed creds to that user and let a compromised unlock scope reseal an attacker share. Move the creds outside the keepDbPath tree.";
+      }
     ];
 
     # The gate. mode = "tpm" (v1): provision on first boot, TPM2-unlock every boot. mode = "oprf"
@@ -796,7 +877,10 @@ in
         # RAM-only ($RUNTIME_DIRECTORY is tmpfs under /run) scratch for the reconstructed LUKS
         # key, so it is fed to cryptsetup from a file rather than a SIGPIPE-prone pipe.
         RuntimeDirectory = "keep-node-frost-gate";
-        RuntimeDirectoryMode = "0700";
+        # 0751 (not 0700): the non-root unlock scope must traverse this dir to read the staged share
+        # (owned by keep-oprf-unlock, 0400). --x for other permits traverse-by-path but not listing;
+        # the reconstructed key stays 0600 root, so a dropped uid can open the share but not the key.
+        RuntimeDirectoryMode = "0751";
         # Bound the boot unlock: a hostile or hung relay must not stall the gate (and thus boot)
         # indefinitely. On timeout the unit fails and the volume stays locked (fail-closed).
         TimeoutStartSec = 90;
