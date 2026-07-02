@@ -11,6 +11,10 @@
 # this harness; the full token-minted-on-A-accepted-by-B round-trip rides on the DB replication in
 # a later increment (it needs a replicated user row + a registration client).
 #
+# The `gated` node adds the FROST-gate leg: with the data dir encrypted, the key installer must seed
+# the shared key only onto the mounted volume and fail closed (never write to bare disk) when the
+# gate cannot unlock. nodeA/nodeB run with the gate off and never reach that branch.
+#
 # Run: nix build .#checks.x86_64-linux.ha-failover
 { vaultRsaKeyFixture, ... }:
 {
@@ -30,6 +34,24 @@
     };
   nodes.nodeA = { };
   nodes.nodeB = { };
+
+  # Gate-enabled node (inherits `defaults`, so it carries the same shared-key wiring). The FROST gate
+  # encrypts /var/lib/vaultwarden, which turns on the installer's gateEnabled branch: requires-on-gate
+  # plus the mountpoint fail-closed guard. Swtpm + a blank disk let the gate self-provision the LUKS
+  # volume, mirroring tests/frost-gate.nix.
+  nodes.gated =
+    { pkgs, ... }:
+    {
+      keepNode.frostGate = {
+        enable = true;
+        volumeDevice = "/dev/vdb";
+      };
+      environment.systemPackages = [ pkgs.cryptsetup ];
+      virtualisation = {
+        emptyDiskImages = [ 512 ]; # /dev/vdb: the encrypted vault volume
+        tpm.enable = true; # swtpm, backing the TPM-sealed LUKS keyslot
+      };
+    };
 
   testScript = ''
     start_all()
@@ -59,5 +81,56 @@
 
     # The key is private to the vaultwarden user, not world-readable.
     nodeA.succeed("test \"$(stat -c '%U %a' /var/lib/vaultwarden/rsa_key.pem)\" = 'vaultwarden 600'")
+
+    # --- Gate-enabled leg: the installer's gateEnabled branch, unreached by nodeA/nodeB. ---
+
+    # Healthy unlock: the gate provisions + mounts the LUKS volume, THEN the installer's mountpoint
+    # guard passes and it seeds the shared key onto the encrypted mapper before vaultwarden starts.
+    gated.wait_for_unit("keep-node-frost-gate.service")
+    gated.wait_for_unit("keep-node-vault-rsa-key.service")
+    gated.wait_for_unit("vaultwarden.service")
+
+    # The data dir IS the decrypted LUKS mapper (encrypted at rest), and the key on it is the shared
+    # fixture -- proving the installer wrote through to the mounted volume, not that vaultwarden
+    # self-generated one.
+    gated.succeed("findmnt -n -o SOURCE /var/lib/vaultwarden | grep -q '/dev/mapper/keep-vault'")
+    assert keyhash(gated) == fixture_hash, (
+        "gate-enabled node did not seed the shared key onto the encrypted volume"
+    )
+
+    # Force the next unlock to fail closed: on the provisioned volume (completion marker present)
+    # remove the TPM2 keyslot, leaving no usable key. The gate then refuses to reformat and stays
+    # down -- exactly the scenario the requires-on-gate + mountpoint guard defend against.
+    tokid = gated.succeed(
+        "cryptsetup luksDump /dev/vdb | sed -n 's/^\\s*\\([0-9]\\+\\): systemd-tpm2/\\1/p' | head -n1"
+    ).strip()
+    gated.succeed(f"cryptsetup token remove --token-id {tokid} /dev/vdb")
+
+    gated.shutdown()
+    gated.start()
+
+    # Gate fails closed: the volume never unlocks, so /var/lib/vaultwarden is the bare, UNENCRYPTED
+    # root dir.
+    gated.wait_until_succeeds("systemctl is-failed --quiet keep-node-frost-gate.service")
+    gated.fail("test -e /dev/mapper/keep-vault")
+    gated.fail("mountpoint -q /var/lib/vaultwarden")
+
+    # The installer never wrote the shared private key: requires-on-gate aborts it when the gate
+    # fails, so no rsa_key.pem lands on the unencrypted disk -- the security property of the fix.
+    gated.fail("test -e /var/lib/vaultwarden/rsa_key.pem")
+    gated.fail("systemctl is-active --quiet keep-node-vault-rsa-key.service")
+    gated.fail("systemctl is-active --quiet vaultwarden.service")
+
+    # Backstop: exercise the mountpoint guard directly. Run the installer's own script (bypassing the
+    # requires dependency) while the volume is unmounted; it must refuse (non-zero) with the guard's
+    # message and leave bare disk clean. Capture status+output so a regression reports what happened.
+    key_script = gated.succeed(
+        "systemctl show -p ExecStart --value keep-node-vault-rsa-key.service "
+        "| grep -oE '/nix/store/[^ ;]*unit-script-keep-node-vault-rsa-key-start[^ ;]*' | head -n1"
+    ).strip()
+    status, out = gated.execute(f"{key_script} 2>&1")
+    assert status != 0, f"installer did not fail closed while the volume was unmounted (rc={status}): {out}"
+    assert "refusing to write key to unencrypted disk" in out, f"mountpoint guard did not fire: {out}"
+    gated.fail("test -e /var/lib/vaultwarden/rsa_key.pem")
   '';
 }
