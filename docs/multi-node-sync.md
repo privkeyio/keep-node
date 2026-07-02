@@ -1,8 +1,16 @@
 # Multi-node sync (design)
 
-> **Status: design / not implemented.** Keep Node runs a single node today. This chapter
-> inventories Vaultwarden's state and the constraints that an active/standby HA design (the M1
-> milestone) has to respect. It is the output of a scoping spike, written before the code.
+> **Status: in progress.** Keep Node runs a single node today; the M1 active/standby HA build is
+> underway, one increment at a time, each covered by the `ha-failover` nixosTest. Landed so far:
+> the **shared JWT signing key** (`keepNode.vaultReplication.rsaKeyFile` , installed on every node
+> before Vaultwarden starts so a session token minted on the active is accepted by a promoted
+> standby, and, when the FROST gate is on, written only onto the mounted encrypted volume) and
+> **Litestream WAL streaming** of `db.sqlite3` (`keepNode.vaultReplication.litestream.enable` , the
+> active continuously ships the vault DB's write-ahead log to a replica a peer can restore).
+> Still to come: the cross-node **transport** (both land the replica locally today; the test stubs
+> the hop with a copy , the real deploy ships it over the encrypted mesh, which does not exist yet),
+> **attachment/Send file replication**, **promotion/failover**, and a **replication-lag** signal.
+> This chapter inventories Vaultwarden's state and the constraints that design has to respect.
 
 Vaultwarden (1.36.x here) keeps its state under one data directory, the FROST-gated LUKS
 volume mounted at `/var/lib/vaultwarden`. Keep Node configures the **SQLite** backend, which is

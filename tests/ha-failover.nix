@@ -26,13 +26,21 @@
   # a Nix-store path so the key sits world-readable in /nix/store. Safe here because the fixture is
   # an ephemeral per-build key, never a real secret. A real deploy must pass an out-of-band path.
   defaults =
-    { ... }:
+    { pkgs, ... }:
     {
       imports = [ ../nixos/keep-node.nix ];
       keepNode.vaultReplication.rsaKeyFile = "${vaultRsaKeyFixture}/rsa_key.pem";
       keepNode.vaultReplication.rsaKeyPubFile = "${vaultRsaKeyFixture}/rsa_key.pub.pem";
+      # sqlite: write/read the WAL probe; litestream: restore the replica on the peer.
+      environment.systemPackages = [
+        pkgs.sqlite
+        pkgs.litestream
+      ];
     };
-  nodes.nodeA = { };
+  # nodeA is the active node: it runs Litestream, streaming its vault DB's WAL to the replica dir.
+  nodes.nodeA = {
+    keepNode.vaultReplication.litestream.enable = true;
+  };
   nodes.nodeB = { };
 
   # Gate-enabled node (inherits `defaults`, so it carries the same shared-key wiring). The FROST gate
@@ -81,6 +89,35 @@
 
     # The key is private to the vaultwarden user, not world-readable.
     nodeA.succeed("test \"$(stat -c '%U %a' /var/lib/vaultwarden/rsa_key.pem)\" = 'vaultwarden 600'")
+
+    # --- Litestream WAL streaming (M1 PR2): nodeA (active) ships its vault DB's WAL to a replica,
+    # and the peer restores it intact. The cross-node hop is stubbed by a copy (like the shared key
+    # in PR1); the real deploy ships the replica over the encrypted mesh transport, which is not
+    # built yet. This proves Litestream captures Vaultwarden's live WAL and a replica round-trips. ---
+    nodeA.wait_for_unit("keep-node-litestream.service")
+
+    # Write a probe into the live vault DB. WAL mode (pinned by the module) lets this commit
+    # concurrently with vaultwarden; busy_timeout rides out vaultwarden briefly holding the writer.
+    nodeA.succeed(
+        "sqlite3 /var/lib/vaultwarden/db.sqlite3 "
+        "\"PRAGMA busy_timeout=10000; CREATE TABLE ha_probe(x TEXT); "
+        "INSERT INTO ha_probe VALUES('m1-litestream-marker');\""
+    )
+    # Litestream syncs every ~1s; give it a couple cycles to ship the probe's WAL frames.
+    nodeA.succeed("sleep 4")
+    nodeA.succeed("test -n \"$(ls -A /var/lib/vault-replica 2>/dev/null)\"")
+
+    # Transport stand-in: copy the replica to the peer (real deploy: over the mesh).
+    replica_b64 = nodeA.succeed("tar -C /var/lib/vault-replica -cf - . | base64 -w0").strip()
+    nodeB.succeed(
+        f"mkdir -p /tmp/replica && printf %s '{replica_b64}' | base64 -d | tar -C /tmp/replica -xf -"
+    )
+
+    # The peer restores the vault DB from the received replica and finds the probe: the WAL streamed
+    # end to end, so a promoted standby would carry the active's data.
+    nodeB.succeed("litestream restore -o /tmp/restored.db file:///tmp/replica")
+    restored = nodeB.succeed("sqlite3 /tmp/restored.db 'SELECT x FROM ha_probe'").strip()
+    assert restored == "m1-litestream-marker", f"probe did not survive replication: {restored!r}"
 
     # --- Gate-enabled leg: the installer's gateEnabled branch, unreached by nodeA/nodeB. ---
 
