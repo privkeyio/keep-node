@@ -107,6 +107,15 @@
         printf '%s\n\nsp1\n' "$kshare" | keep --no-mlock --path "$out/holder" frost import >/dev/null
       '';
 
+      # A shared Vaultwarden JWT signing key (rsa_key.pem, 2048-bit RSA PKCS#8) for the multi-node
+      # HA test: both nodes install THESE bytes so a token minted on one validates on the other.
+      # Test-only (real deploys deliver an out-of-band key); generated once and cached.
+      vaultRsaKeyFixture = pkgs.runCommand "vault-rsa-key" { nativeBuildInputs = [ pkgs.openssl ]; } ''
+        mkdir -p "$out"
+        openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$out/rsa_key.pem"
+        openssl rsa -in "$out/rsa_key.pem" -pubout -out "$out/rsa_key.pub.pem" 2>/dev/null
+      '';
+
       # Pure-eval guard for the frostGate sealPcrs hardening: the module must reject a sealPcrs
       # that binds the TPM seal to nothing. An empty list makes --tpm2-pcrs= bind no PCRs
       # (fail-open: the key releases regardless of boot state); an out-of-range index is a typo
@@ -250,7 +259,10 @@
           else
             "touch $out"
         );
-        # ha-failover = pkgs.testers.runNixOSTest { imports = [ ./tests/ha-failover.nix ]; };  # stub
+        ha-failover = pkgs.testers.runNixOSTest {
+          imports = [ ./tests/ha-failover.nix ];
+          _module.args.vaultRsaKeyFixture = vaultRsaKeyFixture;
+        };
       };
 
       devShells.${system}.default = pkgs.mkShell {

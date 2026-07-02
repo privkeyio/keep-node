@@ -12,6 +12,7 @@
     ./keep-web.nix
     ./frost-gate.nix
     ./ingress.nix
+    ./vault-replication.nix
   ];
 
   # Appliance defaults (overridable). Hostname is left to the host/VM/test layer so it does
