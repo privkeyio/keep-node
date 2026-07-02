@@ -57,6 +57,9 @@
         # 0400 secret, not a store path. Matches the fixture DB's password.
         keepPasswordEnvFile = "${pkgs.writeText "keep-pass-env" "KEEP_PASSWORD=fixturepass123"}";
         tpmTcti = "device:/dev/tpmrm0";
+        # Test-only: forward KEEP_ALLOW_WS into the confined boot scope so it can reach the in-VM
+        # ws:// relay. Never set in production, where the boot OPRF exchange must stay over wss://.
+        allowInsecureWs = true;
       };
 
       # A non-root gate scope (keep-node-5y0) needs the tss group + /dev/tpmrm0 at tss:0660.
@@ -182,9 +185,14 @@
     box.succeed("findmnt -n -o SOURCE /var/lib/vaultwarden | grep -q '/dev/mapper/keep-vault'")
     box.wait_for_unit("vaultwarden.service")
 
-    # The unlock ran NON-ROOT (keep-node-5y0): the module chowns keepDbPath to keep-oprf-unlock and
-    # the confined scope runs as that user with no caps, so the unlock -- which needs rw on that DB
-    # and the TPM -- could only have succeeded as the unprivileged user, not root-with-DAC-override.
+    # The unlock ran NON-ROOT (keep-node-5y0). The successful mount asserted just above is itself the
+    # proof: the confined scope stages its OPRF share 0400-owned-by-keep-oprf-unlock and runs with an
+    # empty CapabilityBoundingSet, so a scope that regressed to running as root would be capless root
+    # -- it would hit EACCES reading that 0400 share, fail to reconstruct the key, and never open or
+    # mount the volume. (We don't grep the journal for the scope's uid: keep logs to stderr, which
+    # systemd-run --pipe routes to the root gate unit, so nothing is journaled under keep-oprf-unlock.)
+    # Also assert the tmpfiles chown the scope depends on landed, so a regression that drops it -- and
+    # would otherwise make the DB unreadable to the non-root scope -- fails here with a clear signal.
     box.succeed("stat -c %U /var/lib/keep-box | grep -qx keep-oprf-unlock")
   '';
 }

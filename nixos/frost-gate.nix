@@ -183,8 +183,7 @@ let
             KEEP_PASSWORD="$(cat "$CREDENTIALS_DIRECTORY/keep-password")" \
               ${systemdRun} --pipe --wait --collect --quiet \
                 -E KEEP_PASSWORD \
-                -E KEEP_ALLOW_WS \
-                -p User=keep-oprf-unlock \
+                ${lib.optionalString cfg.allowInsecureWs "-E KEEP_ALLOW_WS \\\n                "}-p User=keep-oprf-unlock \
                 -p SupplementaryGroups=tss \
                 -p CapabilityBoundingSet= \
                 -p AmbientCapabilities= \
@@ -689,6 +688,19 @@ in
         password into the global systemd manager environment.
       '';
     };
+
+    allowInsecureWs = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        Test-only. When true, the boot OPRF-unlock scope forwards `-E KEEP_ALLOW_WS`, which disables
+        keep's ws->wss upgrade (SSRF/TLS) guard on the boot OPRF exchange so the confined scope can
+        talk to a plaintext `ws://` relay. This exists solely so the VM test can run against an
+        in-VM plaintext relay; it MUST never be enabled in production, where the boot exchange must
+        stay over TLS (`wss://`). Left false, the `-E KEEP_ALLOW_WS` flag is absent from the scope
+        entirely and the guard stays on.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -787,6 +799,40 @@ in
           || (config.boot.lanzaboote.enable or false)
           || (config.keepNode.measuredBoot.enable or false);
         message = "keepNode.frostGate.sealPcrs includes PCR 11, but PCR 11 is only measured when the box boots a Unified Kernel Image. Enable measured boot (keepNode.measuredBoot.enable = true) or remove 11 from sealPcrs; otherwise the seal binds an unpopulated PCR 11 and the next boot fails closed.";
+      }
+      {
+        # The boot gate reaches /dev/tpmrm0 (to attach its measured-boot quote) via the tss group and
+        # the udev rules that security.tpm2 installs; the non-root unlock scope is a member of tss and
+        # depends on that node existing at tss:0660. The mkDefault above turns tpm2 on by default, but
+        # another module can still explicitly set security.tpm2.enable = false, which silently strips
+        # the tss group and the /dev/tpmrm0 udev rules -- then every boot unlock fails closed with no
+        # eval-time signal. Catch that override here rather than at 3am on the appliance.
+        assertion = cfg.mode != "oprf" || config.security.tpm2.enable;
+        message = "keepNode.frostGate.mode = \"oprf\" requires security.tpm2.enable = true: the non-root unlock scope reaches /dev/tpmrm0 for its measured-boot quote via the tss group and udev rules that security.tpm2 provides. Some module set security.tpm2.enable = false, which strips both and makes every boot unlock fail closed.";
+      }
+      {
+        # tmpfiles recursively chowns cfg.keepDbPath (the `Z` rule) to the network-facing
+        # keep-oprf-unlock user so the non-root gate can read/write its FROST share DB. If an operator
+        # ever nests the TPM-sealed cred blobs (oprfShareCred / keepPasswordCred) UNDER keepDbPath (or
+        # points keepDbPath at a cred's parent), that recursive chown hands ownership of the sealed
+        # creds to the unprivileged, relay-facing user -- a parser-RCE in the unlock scope could then
+        # rewrite them and reseal an attacker-chosen share. Keep the DB tree strictly disjoint from the
+        # cred paths. The cred options may be null outside oprf mode, so guard each before testing.
+        # keepDbPath itself may be null (a separate requires-assertion above already reports that with
+        # a clean message); short-circuit on it here so this check never forces `norm null` into an
+        # opaque string-coercion throw that would mask the clearer error.
+        assertion =
+          cfg.mode != "oprf"
+          || cfg.keepDbPath == null
+          || (
+            let
+              norm = p: if lib.hasSuffix "/" p then p else p + "/";
+              db = norm cfg.keepDbPath;
+              nested = c: c != null && (lib.hasPrefix db (norm c) || lib.hasPrefix (norm c) db);
+            in
+            !(nested cfg.oprfShareCred) && !(nested cfg.keepPasswordCred)
+          );
+        message = "keepNode.frostGate.keepDbPath must be disjoint from oprfShareCred and keepPasswordCred in mode = \"oprf\": the module recursively chowns keepDbPath to the unprivileged, relay-facing keep-oprf-unlock user, so nesting the TPM-sealed cred blobs under keepDbPath (or vice versa) would transfer ownership of the sealed creds to that user and let a compromised unlock scope reseal an attacker share. Move the creds outside the keepDbPath tree.";
       }
     ];
 

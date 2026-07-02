@@ -193,7 +193,7 @@
     in
     {
       packages.${system} = {
-        inherit keep-web keep-cli frostGroupFixture;
+        inherit keep-web keep-cli;
         default = keep-web;
         # `nix build .#installer-iso` -> result/iso/*.iso ; dd it to a USB stick.
         installer-iso = installerSystem.config.system.build.isoImage;
