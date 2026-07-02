@@ -105,10 +105,10 @@
     )
     # Litestream syncs every ~1s; give it a couple cycles to ship the probe's WAL frames.
     nodeA.succeed("sleep 4")
-    nodeA.succeed("test -n \"$(ls -A /var/lib/vault-replica 2>/dev/null)\"")
+    nodeA.succeed("test -n \"$(ls -A /var/lib/vaultwarden/replica 2>/dev/null)\"")
 
     # Transport stand-in: copy the replica to the peer (real deploy: over the mesh).
-    replica_b64 = nodeA.succeed("tar -C /var/lib/vault-replica -cf - . | base64 -w0").strip()
+    replica_b64 = nodeA.succeed("tar -C /var/lib/vaultwarden/replica -cf - . | base64 -w0").strip()
     nodeB.succeed(
         f"mkdir -p /tmp/replica && printf %s '{replica_b64}' | base64 -d | tar -C /tmp/replica -xf -"
     )

@@ -52,11 +52,14 @@ in
       '';
       replicaDir = lib.mkOption {
         type = lib.types.str;
-        default = "/var/lib/vault-replica";
+        default = "${dataDir}/replica";
         description = ''
-          Directory Litestream writes the replica to. On a FROST-gated node this is on the
-          unencrypted root fs by default, so a hardened deployment should point it at the encrypted
-          volume or a tmpfs; the replica contains the vault DB's contents (server-side secrets).
+          Directory Litestream writes the replica to. Defaults to a subdirectory of the vault data
+          dir so that on a FROST-gated node it inherits the encrypted, mounted volume: the replica
+          reconstructs the vault DB's contents (server-side secrets) and must not land on unencrypted
+          disk. Must stay under the data dir (an assertion below enforces that): on a gated node that
+          keeps the replica encrypted-at-rest, and it keeps the path inside the service sandbox's
+          writable set so Litestream can actually create it.
         '';
       };
     };
@@ -118,6 +121,26 @@ in
     })
 
     (lib.mkIf cfg.litestream.enable {
+      # The unit hard-requires vaultwarden.service and reads its db.sqlite3; surface a misconfig
+      # instead of wiring ordering deps to a unit that never materializes. Also keep replicaDir under
+      # the data dir so the replica (the vault DB's contents) inherits its encryption-at-rest and
+      # stays inside the service sandbox's writable set.
+      assertions = [
+        {
+          assertion = config.services.vaultwarden.enable;
+          message = "keepNode.vaultReplication.litestream.enable is true but services.vaultwarden.enable is false: Litestream has no vault DB to replicate.";
+        }
+        {
+          # Unconditional: on a gated node this keeps the replica on the encrypted volume, and in all
+          # cases it keeps replicaDir inside the unit's single ReadWritePaths entry (dataDir) so the
+          # sandbox can write it. Reject `/../` so the string prefix can't be escaped off the mount.
+          assertion =
+            lib.hasPrefix "${dataDir}/" cfg.litestream.replicaDir
+            && !lib.hasInfix "/../" cfg.litestream.replicaDir;
+          message = "keepNode.vaultReplication.litestream.replicaDir must live under ${dataDir} (it is set to ${cfg.litestream.replicaDir}) so the replica inherits the vault data dir's encryption and the service sandbox can create it.";
+        }
+      ];
+
       # Litestream's precondition: the DB must be in WAL mode. Vaultwarden defaults it on, but pin
       # it so a future config change can't silently break replication.
       services.vaultwarden.config.ENABLE_DB_WAL = true;
@@ -126,23 +149,62 @@ in
         description = "Litestream WAL replication of the Vaultwarden vault DB";
         wantedBy = [ "multi-user.target" ];
         # Replicate a running DB: start after Vaultwarden has created db.sqlite3, and after the FROST
-        # gate mounted the (encrypted) data dir. requires vaultwarden so it stops if the vault stops.
+        # gate mounted the (encrypted) data dir.
         after = [
           "vaultwarden.service"
           "keep-node-frost-gate.service"
         ];
-        requires = [ "vaultwarden.service" ];
+        # Requires vaultwarden: without it there is no DB to replicate, so a stopped/failed vault
+        # takes the replicator down too. A vault *restart* leaves db.sqlite3 in place, so Litestream
+        # keeps following the same file and does not need to restart in lockstep. When the gate
+        # encrypts the data dir, also require it: the replica reconstructs the vault DB, so a failed
+        # unlock must abort replication rather than write plaintext to disk. Mirrors the RSA installer.
+        requires = [ "vaultwarden.service" ] ++ lib.optional gateEnabled "keep-node-frost-gate.service";
+        # Disable the start-limit (default 5 restarts / 10s): first-boot schema migrations can exceed
+        # that window, and giving up would leave replication silently off forever. Retry until the DB
+        # appears. (This is a [Unit] setting, hence not in serviceConfig.)
+        startLimitIntervalSec = 0;
         serviceConfig = {
           # Run as the vaultwarden user: it owns the 0700 data dir, so this is the only uid that can
           # read db.sqlite3 and write Litestream's shadow WAL beside it.
           User = "vaultwarden";
           Group = "vaultwarden";
-          StateDirectory = "vault-replica";
+          ExecStartPre =
+            # Defense in depth beside the `requires` above: only write the replica onto the mounted,
+            # encrypted volume. If the gate "succeeded" without mounting, fail closed rather than
+            # reconstruct the vault DB on the unencrypted root fs. The `+` prefix runs this guard
+            # OUTSIDE the unit's mount namespace: ProtectSystem/ReadWritePaths bind-mounts dataDir
+            # inside the sandbox, so an in-namespace `mountpoint` would read as mounted even when the
+            # LUKS volume is absent. Running on the host mount table makes the check real. Use an
+            # absolute mountpoint path since `+` execs do not get the unit `path`.
+            lib.optional gateEnabled (
+              "+"
+              + pkgs.writeShellScript "keep-node-litestream-mount-guard" ''
+                set -euo pipefail
+                if ! ${pkgs.util-linux}/bin/mountpoint -q ${lib.escapeShellArg dataDir}; then
+                  echo "keep-node-litestream: ${dataDir} is not a mountpoint (FROST volume not mounted); refusing to write the vault-DB replica to unencrypted disk" >&2
+                  exit 1
+                fi
+              ''
+            )
+            # vaultwarden.service's StateDirectory creates dataDir at 0700; pre-create the replica
+            # subdir 0700 so Litestream never widens it (it would create 0755). This runs as the
+            # vaultwarden user (no `+` prefix), so the dir is vaultwarden-owned without a chown.
+            ++ [
+              "${pkgs.coreutils}/bin/install -d -m 0700 ${lib.escapeShellArg cfg.litestream.replicaDir}"
+            ];
           ExecStart = "${pkgs.litestream}/bin/litestream replicate ${lib.escapeShellArg "${dataDir}/db.sqlite3"} ${lib.escapeShellArg "file://${cfg.litestream.replicaDir}"}";
           # db.sqlite3 does not exist until Vaultwarden's first start finishes creating it; retry
-          # rather than fail the boot.
+          # rather than fail the boot (start-limit disabled above so retries never exhaust).
           Restart = "on-failure";
           RestartSec = 2;
+          # Local file:// replica: no network, no privilege escalation, read-only fs except the data
+          # dir where db.sqlite3 and the replica (+ its shadow WAL) live.
+          NoNewPrivileges = true;
+          ProtectSystem = "strict";
+          ProtectHome = true;
+          PrivateTmp = true;
+          ReadWritePaths = [ dataDir ];
         };
       };
     })
