@@ -8,6 +8,7 @@
 {
   config,
   lib,
+  pkgs,
   ...
 }:
 let
@@ -15,6 +16,9 @@ let
   # The vault data dir: the FROST gate mounts the LUKS volume here, and vaultwarden writes
   # db.sqlite3 / rsa_key.pem / attachments here. Matches keepNode.frostGate.dataDir default.
   dataDir = "/var/lib/vaultwarden";
+  # Whether the FROST gate encrypts this data dir. When it does, the shared signing key must only
+  # be written after the LUKS volume is mounted, never onto the unencrypted root fs.
+  gateEnabled = config.keepNode.frostGate.enable or false;
 in
 {
   options.keepNode.vaultReplication = {
@@ -27,7 +31,9 @@ in
         deliver the same bytes to every node so a session token minted on the active node is
         accepted by a promoted standby. Must be a path string on the target host, not a Nix-path
         literal, so the private key is never copied into the world-readable Nix store. Null leaves
-        Vaultwarden to generate its own per-node key (single-node only).
+        Vaultwarden to generate its own per-node key (single-node only). The key is seeded only if
+        absent (a later replication step must never be clobbered), so rotating it means deleting
+        `rsa_key.pem` on every node before redeploy; changing this path alone is a silent no-op.
       '';
     };
     rsaKeyPubFile = lib.mkOption {
@@ -38,6 +44,15 @@ in
   };
 
   config = lib.mkIf (cfg.rsaKeyFile != null) {
+    # The installer orders before/requiredBy vaultwarden.service; surface a misconfig instead of
+    # wiring those ordering deps to a unit that never materializes.
+    assertions = [
+      {
+        assertion = config.services.vaultwarden.enable;
+        message = "keepNode.vaultReplication.rsaKeyFile is set but services.vaultwarden.enable is false: the shared-key installer has nothing to seed a key for.";
+      }
+    ];
+
     systemd.services.keep-node-vault-rsa-key = {
       description = "Install the shared Vaultwarden JWT signing key (multi-node HA)";
       wantedBy = [ "multi-user.target" ];
@@ -46,6 +61,12 @@ in
       before = [ "vaultwarden.service" ];
       requiredBy = [ "vaultwarden.service" ];
       after = [ "keep-node-frost-gate.service" ];
+      # When the gate encrypts the data dir, bind to it: a failed unlock must abort the installer so
+      # the cluster-wide RSA private key is never written to unencrypted disk. Mirrors the `requires`
+      # that vaultwarden.service itself places on the gate.
+      requires = lib.optional gateEnabled "keep-node-frost-gate.service";
+      # `mountpoint` (util-linux) is not on the default service PATH; the guard below needs it.
+      path = lib.optional gateEnabled pkgs.util-linux;
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
@@ -53,6 +74,15 @@ in
       script = ''
         set -euo pipefail
         d=${lib.escapeShellArg dataDir}
+        ${lib.optionalString gateEnabled ''
+          # Defense in depth beside the `requires` above: only write onto the mounted, encrypted
+          # volume. If the gate somehow "succeeded" without mounting, fail closed rather than persist
+          # the shared signing key on the unencrypted root fs.
+          if ! mountpoint -q "$d"; then
+            echo "keep-node-vault-rsa-key: $d is not a mountpoint (FROST volume not mounted); refusing to write key to unencrypted disk" >&2
+            exit 1
+          fi
+        ''}
         # vaultwarden.service's StateDirectory would create this, but we run first; make it now with
         # the same owner/mode so systemd does not fight us.
         install -d -o vaultwarden -g vaultwarden -m 0700 "$d"

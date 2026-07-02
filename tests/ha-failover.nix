@@ -16,20 +16,20 @@
 {
   name = "keep-node-ha-failover";
 
-  nodes.nodeA =
+  # nodeA and nodeB are identical; share one module across both.
+  #
+  # Test-only: this deliberately does the anti-pattern the rsaKeyFile option warns against, feeding
+  # a Nix-store path so the key sits world-readable in /nix/store. Safe here because the fixture is
+  # an ephemeral per-build key, never a real secret. A real deploy must pass an out-of-band path.
+  defaults =
     { ... }:
     {
       imports = [ ../nixos/keep-node.nix ];
       keepNode.vaultReplication.rsaKeyFile = "${vaultRsaKeyFixture}/rsa_key.pem";
       keepNode.vaultReplication.rsaKeyPubFile = "${vaultRsaKeyFixture}/rsa_key.pub.pem";
     };
-  nodes.nodeB =
-    { ... }:
-    {
-      imports = [ ../nixos/keep-node.nix ];
-      keepNode.vaultReplication.rsaKeyFile = "${vaultRsaKeyFixture}/rsa_key.pem";
-      keepNode.vaultReplication.rsaKeyPubFile = "${vaultRsaKeyFixture}/rsa_key.pub.pem";
-    };
+  nodes.nodeA = { };
+  nodes.nodeB = { };
 
   testScript = ''
     start_all()
