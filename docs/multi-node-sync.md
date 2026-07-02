@@ -9,10 +9,14 @@
 > active continuously ships the vault DB's write-ahead log to a replica a peer can restore); and
 > **attachment/Send file replication** (a periodic sync mirrors the `attachments/`+`sends/` files
 > Litestream does not carry into the same replica dir , bounded eventual consistency, since two
-> async replicators cannot give atomic file-before-row).
+> async replicators cannot give atomic file-before-row); and **crash + promote failover**
+> (`keep-node-vault-promote` , an operator-triggered unit that restores the vault DB + files from
+> the delivered replica and starts Vaultwarden, so a standby takes over the failed active's data with
+> sessions intact because the JWT key is shared). The `ha-failover` test crashes the active and
+> asserts the promoted node serves the replicated row + attachment.
 > Still to come: the cross-node **transport** (everything lands the replica locally today; the test
 > stubs the hop with a copy , the real deploy ships it over the encrypted mesh, which does not exist
-> yet), **promotion/failover**, and a **replication-lag** signal.
+> yet), and a **replication-lag** signal.
 > This chapter inventories Vaultwarden's state and the constraints that design has to respect.
 
 Vaultwarden (1.36.x here) keeps its state under one data directory, the FROST-gated LUKS

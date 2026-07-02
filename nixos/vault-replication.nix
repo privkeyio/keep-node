@@ -289,5 +289,47 @@ in
         };
       };
     })
+
+    # Failover promotion. Operator-triggered (NOT wantedBy boot): on loss of the active node, run
+    # `systemctl start keep-node-vault-promote` on a standby to make it the active. It restores the
+    # vault DB and attachment/Send files from the replica the transport delivered into replicaDir,
+    # then (re)starts Vaultwarden. The shared JWT key is already installed (keep-node-vault-rsa-key),
+    # so sessions minted on the failed active survive the switch. Guarded on rsaKeyFile so it exists
+    # on every HA node (the standby runs it), not only nodes that themselves replicate. On a gated
+    # node replicaDir and db.sqlite3 both live on the encrypted mount, so no plaintext hits disk.
+    (lib.mkIf (cfg.rsaKeyFile != null) {
+      systemd.services.keep-node-vault-promote = {
+        description = "Promote this node to active: restore the vault from the replica and serve";
+        path = [
+          pkgs.coreutils
+          pkgs.systemd
+        ];
+        serviceConfig = {
+          Type = "oneshot";
+        };
+        script = ''
+          set -euo pipefail
+          d=${lib.escapeShellArg dataDir}
+          r=${lib.escapeShellArg cfg.litestream.replicaDir}
+          [ -d "$r" ] || { echo "keep-node-vault-promote: no replica at $r to promote from" >&2; exit 1; }
+          # Take the vault down so its DB is not held open while we replace it.
+          systemctl stop vaultwarden.service || true
+          # litestream restore refuses to overwrite an existing file: clear this node's own DB first,
+          # then reconstruct the active's DB from the replica.
+          rm -f "$d/db.sqlite3" "$d/db.sqlite3-wal" "$d/db.sqlite3-shm"
+          ${pkgs.litestream}/bin/litestream restore -o "$d/db.sqlite3" "file://$r"
+          chown vaultwarden:vaultwarden "$d/db.sqlite3"
+          # Bring the attachment/Send files up to the replica's state (the rows reference them).
+          for sub in attachments sends; do
+            if [ -d "$r/$sub" ]; then
+              mkdir -p "$d/$sub"
+              ${pkgs.rsync}/bin/rsync -a --delete "$r/$sub/" "$d/$sub/"
+              chown -R vaultwarden:vaultwarden "$d/$sub"
+            fi
+          done
+          systemctl start vaultwarden.service
+        '';
+      };
+    })
   ];
 }
