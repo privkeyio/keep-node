@@ -85,6 +85,28 @@
         meta.mainProgram = "keep";
       };
 
+      # A pre-generated FROST 2-of-2 group so a test can drive the frost-gate OPRF mode end to end.
+      # The frost-gate module bakes the group npub into its unit at build time (cfg.group), but
+      # `keep frost generate` is random and runs at boot; this resolves that impedance mismatch by
+      # generating the group in a derivation (generate/export/import are offline, no relay/TPM
+      # needed) so the npub is known at eval time (read via IFD) and the box/holder DBs can be
+      # copied into the VMs. Non-reproducible (random keygen) but built once and cached; that is
+      # fine for a test fixture. `box` is the dealer DB (holds the group + both shares, so it can
+      # run oprf-provision); `holder` holds imported share 2; `npub` is the group id.
+      frostGroupFixture = pkgs.runCommand "frost-group-fixture" { nativeBuildInputs = [ keep-cli ]; } ''
+        export HOME="$TMPDIR" KEEP_PASSWORD=fixturepass123 KEEP_YES=1
+        mkdir -p "$out"
+        keep --no-mlock --path "$out/box" init >/dev/null
+        gen="$(keep --no-mlock --path "$out/box" frost generate -t 2 -s 2 --name g 2>&1)"
+        npub="$(printf '%s' "$gen" | grep -aoE 'npub1[a-z0-9]{50,}' | head -1)"
+        [ -n "$npub" ] || { echo "fixture: no npub from frost generate" >&2; exit 1; }
+        printf '%s' "$npub" > "$out/npub"
+        kshare="$(printf 'sp1\nsp1\n' | keep --no-mlock --path "$out/box" frost export --share 2 --group "$npub" 2>&1 | grep -aoE 'kshare1[a-z0-9]+' | head -1)"
+        [ -n "$kshare" ] || { echo "fixture: no kshare from frost export" >&2; exit 1; }
+        keep --no-mlock --path "$out/holder" init >/dev/null
+        printf '%s\n\nsp1\n' "$kshare" | keep --no-mlock --path "$out/holder" frost import >/dev/null
+      '';
+
       # Pure-eval guard for the frostGate sealPcrs hardening: the module must reject a sealPcrs
       # that binds the TPM seal to nothing. An empty list makes --tpm2-pcrs= bind no PCRs
       # (fail-open: the key releases regardless of boot state); an out-of-range index is a typo
@@ -171,7 +193,7 @@
     in
     {
       packages.${system} = {
-        inherit keep-web keep-cli;
+        inherit keep-web keep-cli frostGroupFixture;
         default = keep-web;
         # `nix build .#installer-iso` -> result/iso/*.iso ; dd it to a USB stick.
         installer-iso = installerSystem.config.system.build.isoImage;
@@ -199,6 +221,13 @@
         };
         ingress = pkgs.testers.runNixOSTest {
           imports = [ ./tests/ingress.nix ];
+        };
+        oprf-gate = pkgs.testers.runNixOSTest {
+          imports = [ ./tests/oprf-gate.nix ];
+          _module.args = {
+            keepCliPackage = keep-cli;
+            inherit frostGroupFixture;
+          };
         };
         oprf-unlock = pkgs.testers.runNixOSTest {
           imports = [ ./tests/oprf-unlock.nix ];
