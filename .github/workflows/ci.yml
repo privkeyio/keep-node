@@ -31,13 +31,35 @@ jobs:
           checks=$(nix eval --json '.#checks.x86_64-linux' --apply builtins.attrNames)
           echo "checks=$checks" >> "$GITHUB_OUTPUT"
 
+  # Build the expensive shared packages once and PUSH them to the `privkey` Cachix binary cache, so
+  # the per-check jobs substitute keep-web/keep-cli instead of cold-rebuilding them. keep-cli
+  # (tpm-attestation + bindgen) is a ~10min Rust build that single-node/oprf-unlock depend on and
+  # that is not on cache.nixos.org (it is built from the pinned keep source). Cachix is a real Nix
+  # substituter: it registers store paths validly, unlike the GitHub tar-of-/nix/store cache we
+  # replaced, which restored incompletely (tar permission errors) and forced rebuilds. This is the
+  # SOLE pusher; the check jobs pull anonymously (public cache) and skip pushing, so they never
+  # upload the large per-check VM-test outputs.
+  warm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25
+      - name: Cachix (push privkey)
+        uses: cachix/cachix-action@v15
+        with:
+          name: privkey
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - name: Build and push shared packages
+        run: nix build -L .#packages.x86_64-linux.keep-web .#packages.x86_64-linux.keep-cli
+
   # One check per job, isolated on its own runner. The suite includes several heavy QEMU guests
   # (the oprf-unlock 3-VM quorum and the OVMF/UKI measured-boot + measured-seal tests); running
   # them concurrently in a single `nix flake check` starved the runner and intermittently timed a
   # test out (an unrelated Vaultwarden crash-looping). Giving each check its own runner removes the
   # contention and keeps wall-clock ≈ the slowest single test regardless of suite size.
   check:
-    needs: discover
+    needs: [discover, warm]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -80,12 +102,14 @@ jobs:
         # Pinned to a full commit SHA (v22) so CI never runs a mutable upstream ref.
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25
 
-      # Cache /nix/store so keep-web/keep-cli (built from privkeyio/keep) aren't recompiled every run.
-      - name: Nix store cache
-        uses: nix-community/cache-nix-action@v6
+      # Pull keep-web/keep-cli from the `privkey` Cachix cache the warm job pushed, so they are
+      # substituted, not rebuilt. Public cache -> no auth needed; skipPush so these jobs never
+      # upload their (large, non-reusable) VM-test outputs.
+      - name: Cachix (pull privkey)
+        uses: cachix/cachix-action@v15
         with:
-          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock', '**/*.nix') }}
-          restore-prefixes-first-match: nix-${{ runner.os }}-
+          name: privkey
+          skipPush: true
 
       - name: Build check
         run: nix build -L '.#checks.x86_64-linux.${{ matrix.check }}'
