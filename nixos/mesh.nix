@@ -69,14 +69,21 @@ in
       # Deliberately NOT wantedBy multi-user.target in this increment: the mesh identity (`nvpn init`)
       # and the peer roster/endpoints (`nvpn set`) are provisioned first (by onboarding, or by the
       # test), then this is started. A later increment provisions them declaratively and enables it at
-      # boot; it will also confine the daemon (this runs as root for now to reach /dev/net/tun).
+      # boot; it will also fully confine the daemon behind a dedicated `User=` (this still runs as root
+      # for now to reach /dev/net/tun and to read the root-provisioned config).
       serviceConfig = {
         ExecStart = "${lib.getExe cfg.package} connect";
         # nvpn reads $HOME/.config/nvpn/config.toml.
         Environment = "HOME=${cfg.stateDir}";
         Restart = "on-failure";
         RestartSec = 2;
+        # Even while running as root, bound the process to the one capability boringtun needs
+        # (open /dev/net/tun, configure the interface via `ip`): without a CapabilityBoundingSet a
+        # root process keeps the full set, so AmbientCapabilities alone would confine nothing. Pair
+        # with NoNewPrivileges so no setuid/setcap helper can regain dropped caps.
+        CapabilityBoundingSet = [ "CAP_NET_ADMIN" ];
         AmbientCapabilities = [ "CAP_NET_ADMIN" ];
+        NoNewPrivileges = true;
       };
     };
   };
