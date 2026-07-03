@@ -199,10 +199,10 @@
         f"{env} timeout 30 {keep} --no-mlock --path /root/box {oprf_unlock_args} "
         f"> /root/neg.out 2>/root/neg.err"
     )
-    # ...and it emitted no usable key material. A size check alone (== 32) would miss a key leaked
-    # with a trailing byte or hex-encoded, so assert the provisioned key bytes never appear in the
-    # output. An empty file trivially satisfies this.
-    neg_hex = box.succeed("od -An -v -tx1 /root/neg.out | tr -d ' \\n'").strip()
-    assert provisioned not in neg_hex, "below-threshold unlock leaked the provisioned key material"
+    # ...and it emitted no key material at all. oprf-unlock writes ONLY the raw key to stdout (the
+    # positive path reads that back verbatim as the 32-byte key), so fail-closed means stdout is
+    # empty; any byte on stdout is a leak. Diagnostics still go to stderr (neg.err), which we allow.
+    neg_size = box.succeed("stat -c %s /root/neg.out").strip()
+    assert neg_size == "0", f"below-threshold unlock wrote {neg_size} bytes to stdout; must be empty (fail closed)"
   '';
 }
