@@ -311,10 +311,11 @@ in
             set -euo pipefail
             ${pkgs.coreutils}/bin/install -d -m 0700 ${lib.escapeShellArg cfg.litestream.replicaDir}
             # --delete makes this node's local dataDir the source of truth: a file absent from dataDir
-            # is deleted from the replica. This unit therefore assumes it runs on the ACTIVE node whose
-            # dataDir is authoritative. Once cross-node transport lands (tracked separately), a standby
-            # receiving peer files into replicaDir while its own dataDir is empty would have them wiped
-            # here; that increment MUST make --delete role-aware before running this on a standby.
+            # is deleted from the replica. That is correct ONLY on a node whose dataDir is authoritative
+            # (active or single-node). On a standby, replicaDir holds files the active pushed over the
+            # mesh while this node's own dataDir is empty, so --delete here would wipe the received
+            # replica. It is therefore gated to role != "standby" below (interpolated in): a standby
+            # that ever ran this sync adds nothing and removes nothing, leaving the received files intact.
             for sub in attachments sends; do
               # Vaultwarden creates these only on first attachment/Send; ensure the source exists so
               # rsync never errors on a missing source, but with mkdir (not install -m) so we never
@@ -328,7 +329,9 @@ in
               # due to error"). Both are benign here and self-heal next cycle, so treat them as success;
               # fail the oneshot only on any other non-zero code.
               rc=0
-              ${pkgs.rsync}/bin/rsync -a --delete ${lib.escapeShellArg dataDir}/"$sub"/ ${lib.escapeShellArg cfg.litestream.replicaDir}/"$sub"/ || rc=$?
+              ${pkgs.rsync}/bin/rsync -a ${
+                lib.optionalString (cfg.role != "standby") "--delete "
+              }${lib.escapeShellArg dataDir}/"$sub"/ ${lib.escapeShellArg cfg.litestream.replicaDir}/"$sub"/ || rc=$?
               case "$rc" in
                 0 | 23 | 24) ;;
                 *) exit "$rc" ;;
