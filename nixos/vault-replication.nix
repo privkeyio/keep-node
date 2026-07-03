@@ -171,7 +171,8 @@ in
           older than this, or missing. Set a few push intervals above the ~15s push cadence so a
           transient hiccup does not flap; a sustained breach means the standby is falling behind.
           The signal cross-compares the two nodes' wall clocks, so it assumes they are roughly
-          time-synced (NTP); a heartbeat dated in the future (clock skew) is treated as fresh, not stale.
+          time-synced (NTP); a heartbeat dated slightly in the future (minor clock skew) is treated as
+          fresh, not stale, while a large future skew fails as an implausibly wrong active clock.
         '';
       };
     };
@@ -563,8 +564,16 @@ in
               exit 1
             fi
             lag=$(( now - stamp ))
-            # A negative lag means the active's clock leads ours (skew), not staleness: the heartbeat was just
-            # received, so treat it as fresh rather than a false alarm. Only genuine over-threshold age fails.
+            # A small negative lag means the active's clock leads ours (minor skew), not staleness: the
+            # heartbeat was just received, so treat it as fresh rather than a false alarm. But a large
+            # negative lag is an implausibly skewed active clock that would otherwise read fresh forever
+            # and mask a real stall, so fail on anything beyond the tolerance. Only genuine over-threshold
+            # age fails past that.
+            skew=5
+            if [ "$lag" -lt "-$skew" ]; then
+              echo "keep-node-vault-lag-check: heartbeat is ''${lag}s in the future; clock skew exceeds ''${skew}s" >&2
+              exit 1
+            fi
             if [ "$lag" -lt 0 ]; then
               lag=0
             fi
