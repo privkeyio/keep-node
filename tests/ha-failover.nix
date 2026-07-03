@@ -156,6 +156,40 @@
     attach = nodeB.succeed("cat /tmp/replica/attachments/probe-cipher/probe-file").strip()
     assert attach == "attach-marker", f"attachment did not replicate: {attach!r}"
 
+    # --- Crash + promote failover (M1 PR4): the standby becomes the active. This is the milestone's
+    # Done criterion: lose the active, promote a standby, and it serves the active's data with sessions
+    # intact (shared key already installed). ---
+    # Deliver the replica (DB + files) into the standby's replicaDir before the active dies -- the
+    # transport stand-in for the mesh, which would have streamed it there continuously.
+    nodeB.succeed(
+        "install -d -o vaultwarden -g vaultwarden -m 0700 /var/lib/vaultwarden/replica && "
+        f"printf %s '{replica_b64}' | base64 -d | tar -C /var/lib/vaultwarden/replica -xf - && "
+        "chown -R vaultwarden:vaultwarden /var/lib/vaultwarden/replica"
+    )
+    nodeA.crash()
+
+    # Promote: restore the vault DB + files from the replica and (re)start Vaultwarden.
+    nodeB.systemctl("start keep-node-vault-promote.service")
+    nodeB.wait_for_unit("vaultwarden.service")
+    nodeB.wait_for_open_port(8222)
+    nodeB.succeed("curl -fsS http://localhost:8222/alive")
+
+    # The promoted node serves the active's data from its LIVE vault (not a scratch restore): the DB
+    # row and the attachment file are both present, so a client's data survived the failover.
+    promoted = nodeB.succeed("sqlite3 /var/lib/vaultwarden/db.sqlite3 'SELECT x FROM ha_probe'").strip()
+    assert promoted == "m1-litestream-marker", f"promoted vault missing the replicated row: {promoted!r}"
+    nodeB.succeed("test -f /var/lib/vaultwarden/attachments/probe-cipher/probe-file")
+
+    # The shared key is unchanged by promotion, so JWTs minted on the dead active still verify here.
+    assert keyhash(nodeB) == fixture_hash, "promotion altered the shared JWT signing key"
+
+    # No probe-Send assertion here: the --delete test above removed the Send from the replica before
+    # it was delivered to nodeB, so the promoted node correctly has no Send file to serve.
+    # TODO: promotion's replication-resume step (restart keep-node-litestream + vault-files after the
+    # swap) is unit-tested logic gated on litestream.enable; nodeB runs litestream disabled, so this
+    # harness does not exercise the resume path. Covering it would need nodeB reconfigured with
+    # litestream enabled, which risks flakiness against the existing gate-off assertions above.
+
     # --- Gate-enabled leg: the installer's gateEnabled branch, unreached by nodeA/nodeB. ---
 
     # Healthy unlock: the gate provisions + mounts the LUKS volume, THEN the installer's mountpoint

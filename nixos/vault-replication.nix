@@ -36,6 +36,21 @@ let
         exit 1
       fi
     '';
+  # Shared replicaDir safety check. Used by BOTH the litestream block and the promote block: promote
+  # (guarded on rsaKeyFile) restores from replicaDir destructively, so a node with rsaKeyFile set but
+  # litestream disabled still needs this validation. On a gated node it keeps the replica on the
+  # encrypted volume, and in all cases it keeps replicaDir inside the unit's single ReadWritePaths
+  # entry (dataDir) so the sandbox can write it. Reject `/../` so the string prefix can't be escaped
+  # off the mount. Also reject replicaDir under the two synced subtrees (attachments/, sends/): the
+  # file sync rsyncs those INTO replicaDir, so a replicaDir inside either would recurse and fill disk.
+  replicaDirAssertion = {
+    assertion =
+      lib.hasPrefix "${dataDir}/" cfg.litestream.replicaDir
+      && !lib.hasInfix "/../" cfg.litestream.replicaDir
+      && !lib.hasPrefix "${dataDir}/attachments" cfg.litestream.replicaDir
+      && !lib.hasPrefix "${dataDir}/sends" cfg.litestream.replicaDir;
+    message = "keepNode.vaultReplication.litestream.replicaDir must live under ${dataDir}, but not under ${dataDir}/attachments or ${dataDir}/sends (it is set to ${cfg.litestream.replicaDir}), so the replica inherits the vault data dir's encryption, the service sandbox can create it, and the file sync does not rsync a synced subtree into itself.";
+  };
 in
 {
   options.keepNode.vaultReplication = {
@@ -140,27 +155,14 @@ in
     (lib.mkIf cfg.litestream.enable {
       # The unit hard-requires vaultwarden.service and reads its db.sqlite3; surface a misconfig
       # instead of wiring ordering deps to a unit that never materializes. Also keep replicaDir under
-      # the data dir so the replica (the vault DB's contents) inherits its encryption-at-rest and
-      # stays inside the service sandbox's writable set.
+      # the data dir (shared replicaDirAssertion) so the replica (the vault DB's contents) inherits
+      # its encryption-at-rest and stays inside the service sandbox's writable set.
       assertions = [
         {
           assertion = config.services.vaultwarden.enable;
           message = "keepNode.vaultReplication.litestream.enable is true but services.vaultwarden.enable is false: Litestream has no vault DB to replicate.";
         }
-        {
-          # Unconditional: on a gated node this keeps the replica on the encrypted volume, and in all
-          # cases it keeps replicaDir inside the unit's single ReadWritePaths entry (dataDir) so the
-          # sandbox can write it. Reject `/../` so the string prefix can't be escaped off the mount.
-          # Also reject replicaDir under the two synced subtrees (attachments/, sends/): the file sync
-          # rsyncs those INTO replicaDir, so a replicaDir inside either would recurse into itself and
-          # fill the disk.
-          assertion =
-            lib.hasPrefix "${dataDir}/" cfg.litestream.replicaDir
-            && !lib.hasInfix "/../" cfg.litestream.replicaDir
-            && !lib.hasPrefix "${dataDir}/attachments" cfg.litestream.replicaDir
-            && !lib.hasPrefix "${dataDir}/sends" cfg.litestream.replicaDir;
-          message = "keepNode.vaultReplication.litestream.replicaDir must live under ${dataDir}, but not under ${dataDir}/attachments or ${dataDir}/sends (it is set to ${cfg.litestream.replicaDir}), so the replica inherits the vault data dir's encryption, the service sandbox can create it, and the file sync does not rsync a synced subtree into itself.";
-        }
+        replicaDirAssertion
       ];
 
       # Litestream's precondition: the DB must be in WAL mode. Vaultwarden defaults it on, but pin
@@ -287,6 +289,95 @@ in
           OnUnitActiveSec = "15s";
           Unit = "keep-node-vault-files.service";
         };
+      };
+    })
+
+    # Failover promotion. Operator-triggered (NOT wantedBy boot): on loss of the active node, run
+    # `systemctl start keep-node-vault-promote` on a standby to make it the active. It restores the
+    # vault DB and attachment/Send files from the replica the transport delivered into replicaDir,
+    # then (re)starts Vaultwarden. The shared JWT key is already installed (keep-node-vault-rsa-key),
+    # so sessions minted on the failed active survive the switch. Guarded on rsaKeyFile so it exists
+    # on every HA node (the standby runs it), not only nodes that themselves replicate. On a gated
+    # node replicaDir and db.sqlite3 both live on the encrypted mount, and the fail-closed mount guard
+    # below refuses to run unless that mount is present, so no plaintext restore hits unencrypted disk.
+    (lib.mkIf (cfg.rsaKeyFile != null) {
+      # Same replicaDir safety check as the litestream block: this unit restores from replicaDir
+      # destructively and may run on a node with litestream disabled, so validate replicaDir here too.
+      assertions = [ replicaDirAssertion ];
+
+      systemd.services.keep-node-vault-promote = {
+        description = "Promote this node to active: restore the vault from the replica and serve";
+        # Order after the FROST gate like the replicators: the restore writes the plaintext vault DB +
+        # files, so on a gated node it must land only on the mounted encrypted volume, never bare disk.
+        after = [ "keep-node-frost-gate.service" ];
+        requires = lib.optional gateEnabled "keep-node-frost-gate.service";
+        path = [
+          pkgs.coreutils
+          pkgs.systemd
+        ]
+        # `mountpoint` (util-linux) is not on the default service PATH; the guard below needs it.
+        ++ lib.optional gateEnabled pkgs.util-linux;
+        serviceConfig = {
+          Type = "oneshot";
+          # Fail-closed guard mirroring the replicators: refuse to restore the plaintext vault onto
+          # unencrypted disk when the gate failed to mount. See mkMountGuard for the `+`-prefix reason.
+          ExecStartPre = lib.optional gateEnabled (mkMountGuard {
+            name = "keep-node-vault-promote-mount-guard";
+            msg = "keep-node-vault-promote: ${dataDir} is not a mountpoint (FROST volume not mounted); refusing to restore the vault to unencrypted disk";
+          });
+        };
+        script = ''
+          set -euo pipefail
+          data_dir=${lib.escapeShellArg dataDir}
+          replica_dir=${lib.escapeShellArg cfg.litestream.replicaDir}
+          [ -d "$replica_dir" ] || { echo "keep-node-vault-promote: no replica at $replica_dir to promote from" >&2; exit 1; }
+          # Restore into a temp file FIRST, before touching the live DB: under set -e a partial/corrupt
+          # restore, or a replica with no restorable generation, must not leave this node with no DB and
+          # the vault down. The restore-to-temp is itself the fail-closed generation guard: litestream
+          # restore errors (aborting here, live DB intact) when the replica has nothing to restore, and
+          # the sqlite verify below catches an empty/corrupt result -- both before any destructive step.
+          # litestream refuses to overwrite an existing file, so restore to a fresh temp name and clean
+          # it up on any failure.
+          tmp="$data_dir/db.sqlite3.promote-tmp"
+          rm -f "$tmp" "$tmp-wal" "$tmp-shm"
+          trap 'rm -f "$tmp" "$tmp-wal" "$tmp-shm"' EXIT
+          ${pkgs.litestream}/bin/litestream restore -o "$tmp" "file://$replica_dir"
+          # Verify the restore opens as a valid SQLite DB before committing to it.
+          ${pkgs.sqlite}/bin/sqlite3 "$tmp" 'PRAGMA schema_version;' >/dev/null
+          # Only now take the vault down and swap the verified DB in atomically. Stopping vaultwarden
+          # also stops keep-node-litestream (it Requires+After vaultwarden), so we resume it below.
+          systemctl stop vaultwarden.service || true
+          rm -f "$data_dir/db.sqlite3" "$data_dir/db.sqlite3-wal" "$data_dir/db.sqlite3-shm"
+          mv "$tmp" "$data_dir/db.sqlite3"
+          trap - EXIT
+          chown vaultwarden:vaultwarden "$data_dir/db.sqlite3"
+          # Bring the attachment/Send files up to the replica's state (the rows reference them).
+          for sub in attachments sends; do
+            if [ -d "$replica_dir/$sub" ]; then
+              # 0700 like the rest of the data dir (never widen to rsync's default 0755).
+              ${pkgs.coreutils}/bin/install -d -m 0700 "$data_dir/$sub"
+              # The replica arrived over the peer transport (a trust boundary): --no-D drops any
+              # device/special files, --safe-links drops absolute/out-of-tree symlinks (attachments
+              # and Sends are plain ciphertext files, never symlinks), and --chmod caps restored modes
+              # to dir 0700 / file 0600 so a crafted replica cannot land world-readable, special, or
+              # escaping-symlink files; chown fixes ownership.
+              rc=0
+              ${pkgs.rsync}/bin/rsync -a --no-D --safe-links --chmod=D700,F600 --delete "$replica_dir/$sub/" "$data_dir/$sub/" || rc=$?
+              # Tolerate 23/24 (partial/vanished) for parity with keep-node-vault-files and robustness.
+              case "$rc" in
+                0 | 23 | 24) ;;
+                *) exit "$rc" ;;
+              esac
+              chown -R vaultwarden:vaultwarden "$data_dir/$sub"
+            fi
+          done
+          systemctl start vaultwarden.service
+          # Stopping vaultwarden above also stopped the replicators (they Require it); resume them so
+          # the newly-promoted active streams its WAL + files again and the cluster keeps a replica.
+          # Only when they exist on THIS node: they are defined under litestream.enable while promote
+          # is under rsaKeyFile, so a promote-only node must not start non-existent units.
+          ${lib.optionalString cfg.litestream.enable "systemctl start keep-node-litestream.service keep-node-vault-files.timer"}
+        '';
       };
     })
   ];
