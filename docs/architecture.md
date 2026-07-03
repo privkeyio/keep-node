@@ -12,7 +12,12 @@ appliance is assembled from a few NixOS modules under `nixos/`, wired together b
 
 - `vaultwarden.nix`, the password-manager service.
 - `keep-web.nix`, the Keep headless daemon.
-- `frost-gate.nix`, the encrypted-volume gate that unseals the vault.
+- `frost-gate.nix`, the encrypted-volume gate that unseals the vault (TPM seal, or the opt-in
+  threshold-OPRF quorum).
+- `vault-replication.nix`, multi-node HA: the shared JWT signing key, Litestream DB streaming,
+  attachment/Send file replication, and crash-then-promote failover.
+- `measured-boot.nix`, opt-in Lanzaboote UKI boot so the seal binds a real measured-boot PCR.
+- `ingress.nix`, an opt-in TLS reverse proxy with brute-force protection for direct HTTPS access.
 
 The whole image boots and is verified in a NixOS VM test with no hardware required, which
 is also the canonical way to try it (`nix flake check`).
@@ -79,12 +84,13 @@ and `mkfs`); on every later boot it unlocks the volume and mounts it at the data
 
 The gate is deliberately fail-closed. It refuses to reformat a device that already holds
 data it did not create, it keeps no local recovery keyslot, and if the volume cannot be
-unlocked it stays down rather than serving without the data. The current appliance image
-seals the volume key to the box's TPM, released by measured boot. Deriving that key from a
-device quorum instead, so that a powered-on box alone cannot release it, is the subject of
-the [Threshold Unlock](./threshold-unlock.md) chapter; the unlock primitive and its
-networking session are implemented in the Keep crates, and wiring the quorum into the
-appliance gate is in progress.
+unlocked it stays down rather than serving without the data. By default the gate seals the
+volume key to the box's TPM (PCR 7 today; a real measured-boot policy needs the opt-in
+`measured-boot.nix`). Deriving that key from a device quorum instead, so that a powered-on box
+alone cannot release it, is the subject of the [Threshold Unlock](./threshold-unlock.md) chapter:
+the gate's opt-in `mode = "oprf"` wires that quorum unlock, and it is validated end to end (relay
++ holder + box) with the real `keep` binary in the `oprf-gate` VM test. The relay-response parser
+runs in a confined, non-root scope, so a bug handling a hostile relay cannot escalate.
 
 ### keep-frost-net
 
@@ -115,8 +121,13 @@ Key custody is split across three roles in a 2-of-3 quorum:
   full key.
 
 No single device, including the box, ever holds enough to decrypt the vault or to sign.
-Running two or more nodes that replicate each other's encrypted state is planned, so that a
-single node failing does not take the vault down; replicas only ever exchange ciphertext.
+Running two or more nodes in active/standby, so a single node failing does not take the vault
+down, is implemented by `vault-replication.nix` (see [Multi-node sync](./multi-node-sync.md)) and
+validated by the `ha-failover` test: the standby shares the active's JWT signing key, tails its DB
+(Litestream) and attachment/Send files, and on a crash a promote step restores and serves them.
+Replicas only ever exchange the application state above the LUKS layer, re-encrypted under each
+node's own volume, never plaintext or a quorum-threshold set of shares. The production cross-node
+transport (the mesh) is still pending; the tests ship the replica with a stand-in copy.
 
 ## Boot flow
 
