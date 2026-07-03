@@ -17,16 +17,18 @@
 > failed active, and because the JWT signing key is shared cluster-wide, an old active that comes
 > back can mint tokens the promoted node accepts and resume writing (split-brain), so the operator
 > runbook must ensure the old active stays down before promoting.
-> In progress: the cross-node **transport**. The `nvpn` encrypted mesh (nostr-vpn, boringtun
-> userspace WireGuard, Nostr-authenticated peers) is packaged and run headless by `keepNode.mesh`,
-> validated forming + carrying traffic over its `10.44.x.y` tunnel with no relay (the `mesh` test).
-> The **DB replica now rides that mesh**: with `keepNode.vaultReplication.role` and `meshReplication`,
-> the active pushes its whole replica dir to a standby receiver reachable ONLY on the mesh interface,
-> and the standby restores it (the `mesh-replication` test ships a probe row across the tunnel). Because
-> `keep-node-vault-files` mirrors `attachments/`+`sends/` into that same replica dir, the
-> **attachment/Send files travel over the mesh too**, in the same push. Still to move onto the mesh: the
-> full **crash+promote** (the `ha-failover` test still stubs that with a copy). Also still to come: a
-> **replication-lag** signal.
+> The cross-node **transport is now real**, end to end. The `nvpn` encrypted mesh (nostr-vpn,
+> boringtun userspace WireGuard, Nostr-authenticated peers) is packaged and run headless by
+> `keepNode.mesh`, validated forming + carrying traffic over its `10.44.x.y` tunnel with no relay (the
+> `mesh` test). With `keepNode.vaultReplication.role` and `meshReplication`, the active pushes its
+> whole replica dir , DB replica plus the mirrored `attachments/`+`sends/` files , to a standby
+> receiver reachable ONLY on the mesh interface; the standby restores it. And the **full failover runs
+> over that mesh**: the `mesh-replication` test replicates a DB row, an attachment, and a Send across
+> the tunnel, propagates a deletion, then crashes the active and asserts the promoted standby serves
+> the mesh-delivered data with the shared JWT key intact , the M1 Done criterion over a genuine
+> transport, so no stand-in copy remains. Still to come for M1: moving the quorum to **2-of-3**,
+> Keep-state-over-`wisp` replication, and a **replication-lag** signal. (Internet NAT traversal for the
+> mesh, via nvpn's Nostr discovery + the bundled `wisp` relay, is a deployment concern beyond the VM.)
 > This chapter inventories Vaultwarden's state and the constraints that design has to respect.
 
 Vaultwarden (1.36.x here) keeps its state under one data directory, the FROST-gated LUKS

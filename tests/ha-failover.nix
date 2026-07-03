@@ -1,15 +1,16 @@
-# Multi-node HA (M1), increment 1: two KeepNodes share one Vaultwarden JWT signing key.
+# Multi-node HA (M1): the replication building blocks + the FROST-gate fail-closed leg. The full
+# end-to-end failover (crash the active, promote the standby, serve its data) now runs over the REAL
+# nvpn mesh in tests/mesh-replication.nix; this harness covers the transport-independent pieces.
 #
-# Vaultwarden generates rsa_key.pem on first start if absent and signs session JWTs with it. If two
-# nodes each generate their own, a token minted on the active is rejected by a promoted standby and
-# every client must re-authenticate on failover. So the cluster must share ONE key. This proves the
-# distribution: both nodes install the same operator-provided key BEFORE vaultwarden starts, so
-# neither generates its own, and the key is byte-identical across nodes -- the precondition for a
-# session to survive failover.
-#
-# Later increments (DB WAL streaming via Litestream, attachment replication, crash+promote) extend
-# this harness; the full token-minted-on-A-accepted-by-B round-trip rides on the DB replication in
-# a later increment (it needs a replicated user row + a registration client).
+# 1. Shared JWT key: Vaultwarden generates rsa_key.pem on first start if absent and signs session
+#    JWTs with it. If two nodes each generate their own, a token minted on the active is rejected by a
+#    promoted standby and every client must re-authenticate on failover. So the cluster must share ONE
+#    key. This proves the distribution: both nodes install the same operator-provided key BEFORE
+#    vaultwarden starts, and it is byte-identical across nodes -- the precondition for a session to
+#    survive failover.
+# 2. Local replica production: nodeA (active) runs Litestream + the attachment/Send file-sync, so a
+#    replica of the DB + files accumulates in replicaDir (the mesh push that ships it to a peer is
+#    covered in tests/mesh-replication.nix), and file deletions propagate into the replica.
 #
 # The `gated` node adds the FROST-gate leg: with the data dir encrypted, the key installer must seed
 # the shared key only onto the mounted volume and fail closed (never write to bare disk) when the
@@ -139,56 +140,6 @@
     # gate-off nodeA and the gate runs on `gated` (litestream off), so no node instantiates that unit
     # under the gate. The RSA-installer guard test below covers the identical guard pattern on the
     # gated node; wiring litestream onto `gated` just to re-prove it would duplicate that coverage.
-
-    # Transport stand-in: copy the replica (DB replica + mirrored files) to the peer.
-    replica_b64 = nodeA.succeed("tar -C /var/lib/vaultwarden/replica -cf - . | base64 -w0").strip()
-    nodeB.succeed(
-        f"mkdir -p /tmp/replica && printf %s '{replica_b64}' | base64 -d | tar -C /tmp/replica -xf -"
-    )
-
-    # The peer restores the vault DB from the received replica and finds the probe: the WAL streamed
-    # end to end, so a promoted standby would carry the active's data.
-    nodeB.succeed("litestream restore -o /tmp/restored.db file:///tmp/replica")
-    restored = nodeB.succeed("sqlite3 /tmp/restored.db 'SELECT x FROM ha_probe'").strip()
-    assert restored == "m1-litestream-marker", f"probe did not survive replication: {restored!r}"
-
-    # ...and the probe attachment file rode along, so the standby has the bytes a cipher row references.
-    attach = nodeB.succeed("cat /tmp/replica/attachments/probe-cipher/probe-file").strip()
-    assert attach == "attach-marker", f"attachment did not replicate: {attach!r}"
-
-    # --- Crash + promote failover (M1 PR4): the standby becomes the active. This is the milestone's
-    # Done criterion: lose the active, promote a standby, and it serves the active's data with sessions
-    # intact (shared key already installed). ---
-    # Deliver the replica (DB + files) into the standby's replicaDir before the active dies -- the
-    # transport stand-in for the mesh, which would have streamed it there continuously.
-    nodeB.succeed(
-        "install -d -o vaultwarden -g vaultwarden -m 0700 /var/lib/vaultwarden/replica && "
-        f"printf %s '{replica_b64}' | base64 -d | tar -C /var/lib/vaultwarden/replica -xf - && "
-        "chown -R vaultwarden:vaultwarden /var/lib/vaultwarden/replica"
-    )
-    nodeA.crash()
-
-    # Promote: restore the vault DB + files from the replica and (re)start Vaultwarden.
-    nodeB.systemctl("start keep-node-vault-promote.service")
-    nodeB.wait_for_unit("vaultwarden.service")
-    nodeB.wait_for_open_port(8222)
-    nodeB.succeed("curl -fsS http://localhost:8222/alive")
-
-    # The promoted node serves the active's data from its LIVE vault (not a scratch restore): the DB
-    # row and the attachment file are both present, so a client's data survived the failover.
-    promoted = nodeB.succeed("sqlite3 /var/lib/vaultwarden/db.sqlite3 'SELECT x FROM ha_probe'").strip()
-    assert promoted == "m1-litestream-marker", f"promoted vault missing the replicated row: {promoted!r}"
-    nodeB.succeed("test -f /var/lib/vaultwarden/attachments/probe-cipher/probe-file")
-
-    # The shared key is unchanged by promotion, so JWTs minted on the dead active still verify here.
-    assert keyhash(nodeB) == fixture_hash, "promotion altered the shared JWT signing key"
-
-    # No probe-Send assertion here: the --delete test above removed the Send from the replica before
-    # it was delivered to nodeB, so the promoted node correctly has no Send file to serve.
-    # TODO: promotion's replication-resume step (restart keep-node-litestream + vault-files after the
-    # swap) is unit-tested logic gated on litestream.enable; nodeB runs litestream disabled, so this
-    # harness does not exercise the resume path. Covering it would need nodeB reconfigured with
-    # litestream enabled, which risks flakiness against the existing gate-off assertions above.
 
     # --- Gate-enabled leg: the installer's gateEnabled branch, unreached by nodeA/nodeB. ---
 

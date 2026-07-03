@@ -1,8 +1,10 @@
-# M1 mesh transport (PR-b): ship the Litestream vault-DB replica over the nvpn mesh. Two nodes form
-# the mesh (as in tests/mesh.nix), the ACTIVE writes a probe into its live vault DB and Litestream
-# captures it, then the active's replica is pushed to the STANDBY over the mesh (rsync to a receiver
-# reachable only on the mesh interface) and the standby restores it -- proving the DB replica crosses
-# a real encrypted transport, not the base64 copy the ha-failover test still uses.
+# M1 multi-node HA over the real nvpn mesh, end to end. Two nodes form the mesh (as in tests/mesh.nix);
+# the ACTIVE writes a probe into its live vault DB (Litestream) plus a probe attachment and Send (the
+# file-sync), and pushes its whole replica to the STANDBY over the mesh (rsync to a receiver reachable
+# only on the mesh interface). The test proves: the DB replica crosses and restores; the attachment +
+# Send files cross; a deletion propagates across the mesh; the standby role-gates its own sync; and
+# finally, on crashing the active, the standby PROMOTES and serves the mesh-delivered data -- the M1
+# Done criterion over a real encrypted transport, replacing the base64 stand-in of tests/ha-failover.
 #
 # Run: nix build .#checks.x86_64-linux.mesh-replication
 {
@@ -175,5 +177,29 @@
       # that sync is additionally gated to role != "standby" (a Nix conditional) as belt-and-suspenders
       # for a misconfigured standby that enabled Litestream. ---
       standby.fail("systemctl cat keep-node-vault-files.service")
+
+      # --- Crash + promote OVER THE MESH (M1 finale): lose the active, promote the standby, and it
+      # serves the data it received across the tunnel. This is the milestone's Done criterion ("kill a
+      # node, assert continued service") over a REAL transport, not the base64 stand-in. ---
+      active.crash()
+      standby.systemctl("start keep-node-vault-promote.service")
+      standby.wait_for_unit("vaultwarden.service")
+      standby.wait_for_open_port(8222)
+      standby.succeed("curl -fsS http://localhost:8222/alive")
+
+      # The promoted node serves the mesh-delivered data from its LIVE vault: the DB row and the Send
+      # file are present; the attachment is correctly ABSENT (its deletion propagated over the mesh
+      # above); and the shared JWT key -- which lets the dead active's sessions keep validating -- is
+      # unchanged by promotion.
+      promoted = standby.succeed(
+          "sqlite3 /var/lib/vaultwarden/db.sqlite3 'SELECT x FROM ha_probe'"
+      ).strip()
+      assert promoted == "m1-mesh-db-marker", f"promoted vault missing the mesh-replicated row: {promoted!r}"
+      standby.succeed("test -f /var/lib/vaultwarden/sends/probe-send")
+      standby.fail("test -e /var/lib/vaultwarden/attachments/probe-cipher/probe-file")
+      standby.succeed(
+          "test \"$(sha256sum /var/lib/vaultwarden/rsa_key.pem | cut -d' ' -f1)\" "
+          "= \"$(sha256sum ${vaultRsaKeyFixture}/rsa_key.pem | cut -d' ' -f1)\""
+      )
     '';
 }
