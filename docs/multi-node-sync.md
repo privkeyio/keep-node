@@ -17,9 +17,12 @@
 > failed active, and because the JWT signing key is shared cluster-wide, an old active that comes
 > back can mint tokens the promoted node accepts and resume writing (split-brain), so the operator
 > runbook must ensure the old active stays down before promoting.
-> Still to come: the cross-node **transport** (everything lands the replica locally today; the test
-> stubs the hop with a copy , the real deploy ships it over the encrypted mesh, which does not exist
-> yet), and a **replication-lag** signal.
+> In progress: the cross-node **transport**. The `nvpn` encrypted mesh (nostr-vpn, boringtun
+> userspace WireGuard, Nostr-authenticated peers) is now packaged and run headless by
+> `keepNode.mesh`, and a two-node mesh forming + carrying traffic over its `10.44.x.y` tunnel is
+> validated in a VM (the `mesh` test) with no relay. The replicators move onto that tunnel next; until
+> then everything lands the replica locally and the `ha-failover` test still stubs the cross-node hop
+> with a copy. Also still to come: a **replication-lag** signal.
 > This chapter inventories Vaultwarden's state and the constraints that design has to respect.
 
 Vaultwarden (1.36.x here) keeps its state under one data directory, the FROST-gated LUKS
