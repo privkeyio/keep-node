@@ -51,6 +51,27 @@ let
       && !lib.hasPrefix "${dataDir}/sends" cfg.litestream.replicaDir;
     message = "keepNode.vaultReplication.litestream.replicaDir must live under ${dataDir}, but not under ${dataDir}/attachments or ${dataDir}/sends (it is set to ${cfg.litestream.replicaDir}), so the replica inherits the vault data dir's encryption, the service sandbox can create it, and the file sync does not rsync a synced subtree into itself.";
   };
+
+  # rsync-daemon config for the standby's receiver. One module, `vault-replica`, mapped to replicaDir
+  # and writable. No chroot (the path is absolute and vaultwarden-owned; the daemon already runs as
+  # vaultwarden) and no per-module auth: the mesh is the trust boundary (the port is opened only on
+  # the mesh interface), so only the rostered, WireGuard-authenticated peer can reach this at all.
+  # Defense in depth beside that firewall rule: this writable, unauthenticated module is scoped to the
+  # mesh subnet (`hosts allow`/`hosts deny`), so a firewall misconfig or an extra rostered mesh peer
+  # cannot alone reach in and overwrite the vault replica -- the source must sit on the 10.44/16 mesh.
+  rsyncdConf = pkgs.writeText "keep-node-vault-rsyncd.conf" ''
+    pid file = /run/keep-node-vault-receive/rsyncd.pid
+    # `max connections` makes rsync take a lock file; keep both under the writable RuntimeDirectory,
+    # since the ProtectSystem=strict sandbox makes the default /var/run read-only.
+    lock file = /run/keep-node-vault-receive/rsyncd.lock
+    use chroot = false
+    max connections = 4
+    [vault-replica]
+      path = ${cfg.litestream.replicaDir}
+      read only = false
+      hosts allow = 10.44.0.0/16
+      hosts deny = *
+  '';
 in
 {
   options.keepNode.vaultReplication = {
@@ -92,6 +113,45 @@ in
           disk. Must stay under the data dir (an assertion below enforces that): on a gated node that
           keeps the replica encrypted-at-rest, and it keeps the path inside the service sandbox's
           writable set so Litestream can actually create it.
+        '';
+      };
+    };
+
+    role = lib.mkOption {
+      type = lib.types.nullOr (
+        lib.types.enum [
+          "active"
+          "standby"
+        ]
+      );
+      default = null;
+      description = ''
+        This node's HA role. "active" serves and writes the vault and (with meshReplication) pushes
+        its replica dir to the standby; "standby" receives that replica over the mesh and restores
+        from it on promotion. null is single-node (no cross-node push/receive). The vault DB is
+        single-writer, so exactly one node is active at a time.
+      '';
+    };
+
+    meshReplication = {
+      enable = lib.mkEnableOption ''
+        cross-node replication of the vault replica dir over the nvpn mesh. On the active node a
+        timer pushes replicaDir to the standby; on the standby an rsync receiver (reachable ONLY
+        over the mesh interface) writes it into replicaDir. Requires keepNode.mesh and a set role.
+        The mesh already authenticates peers by npub and encrypts (WireGuard), so it is the trust
+        boundary here: the receiver's port is opened only on the mesh interface
+      '';
+      port = lib.mkOption {
+        type = lib.types.port;
+        default = 8730;
+        description = "TCP port the standby's rsync receiver listens on; opened ONLY on the mesh interface.";
+      };
+      meshInterface = lib.mkOption {
+        type = lib.types.str;
+        default = "utun100";
+        description = ''
+          The nvpn mesh interface. The receiver's port is opened only here, so only rostered mesh
+          peers (not the LAN or the underlay) can reach it. Matches nvpn's tunnel device name.
         '';
       };
     };
@@ -300,6 +360,12 @@ in
     # on every HA node (the standby runs it), not only nodes that themselves replicate. On a gated
     # node replicaDir and db.sqlite3 both live on the encrypted mount, and the fail-closed mount guard
     # below refuses to run unless that mount is present, so no plaintext restore hits unencrypted disk.
+    #
+    # SPLIT-BRAIN WARNING (operator runbook, not yet enforced here): promotion does NOT flip this node's
+    # `role`, so a promoted standby keeps running keep-node-vault-receive, and a recovered old active
+    # (still role="active") will `--delete`-push its stale replica onto the promoted node, clobbering the
+    # authoritative copy. The old active MUST stay down until it is reconfigured (role="standby" or
+    # rebuilt from the promoted node) before it is allowed back on the mesh. Fencing is out of scope here.
     (lib.mkIf (cfg.rsaKeyFile != null) {
       # Same replicaDir safety check as the litestream block: this unit restores from replicaDir
       # destructively and may run on a node with litestream disabled, so validate replicaDir here too.
@@ -378,6 +444,136 @@ in
           # is under rsaKeyFile, so a promote-only node must not start non-existent units.
           ${lib.optionalString cfg.litestream.enable "systemctl start keep-node-litestream.service keep-node-vault-files.timer"}
         '';
+      };
+    })
+
+    # Cross-node replication over the nvpn mesh: the active pushes its replica dir to the standby,
+    # which receives it into its own replica dir to restore from on promotion. The mesh authenticates
+    # peers (npub roster) and encrypts (WireGuard), and the receiver's port is opened ONLY on the mesh
+    # interface, so the LAN/underlay cannot reach it -- only the rostered peer.
+    (lib.mkIf cfg.meshReplication.enable {
+      assertions = [
+        {
+          assertion = config.keepNode.mesh.enable;
+          message = "keepNode.vaultReplication.meshReplication.enable requires keepNode.mesh.enable (the transport it pushes over).";
+        }
+        {
+          assertion = cfg.role != null;
+          message = "keepNode.vaultReplication.meshReplication.enable requires keepNode.vaultReplication.role to be \"active\" or \"standby\".";
+        }
+        replicaDirAssertion
+      ];
+
+      # STANDBY: an rsync receiver, running as vaultwarden (the only uid that can write the 0700 data
+      # dir), writing the pushed replica into replicaDir.
+      systemd.services.keep-node-vault-receive = lib.mkIf (cfg.role == "standby") {
+        description = "Receive the vault replica from the active node over the mesh";
+        after = [ "keep-node-frost-gate.service" ];
+        # When the gate encrypts the data dir, require it: the receiver's install -d + rsync write the
+        # vault-DB replica, so a failed unlock must abort here rather than land plaintext on the
+        # unencrypted root fs. Mirrors the replicators.
+        requires = lib.optional gateEnabled "keep-node-frost-gate.service";
+        wantedBy = [ "multi-user.target" ];
+        serviceConfig = {
+          User = "vaultwarden";
+          Group = "vaultwarden";
+          RuntimeDirectory = "keep-node-vault-receive"; # holds the daemon pid file
+          ExecStartPre =
+            # Fail-closed guard beside the `requires` above: refuse to create replicaDir + receive the
+            # replica unless the FROST volume is mounted, so the pushed vault-DB replica never lands on
+            # unencrypted disk. See mkMountGuard for why it runs `+`-prefixed on the host mount table.
+            lib.optional gateEnabled (mkMountGuard {
+              name = "keep-node-vault-receive-mount-guard";
+              msg = "keep-node-vault-receive: ${dataDir} is not a mountpoint (FROST volume not mounted); refusing to receive the vault-DB replica onto unencrypted disk";
+            })
+            # Pre-create replicaDir (the standby runs no Litestream to create it) at 0700.
+            ++ [
+              "${pkgs.coreutils}/bin/install -d -m 0700 ${lib.escapeShellArg cfg.litestream.replicaDir}"
+            ];
+          ExecStart = "${pkgs.rsync}/bin/rsync --daemon --no-detach --port=${toString cfg.meshReplication.port} --config=${rsyncdConf}";
+          Restart = "on-failure";
+          RestartSec = 2;
+          # Bound blast radius: no privilege escalation, read-only fs except the data dir.
+          NoNewPrivileges = true;
+          ProtectSystem = "strict";
+          ProtectHome = true;
+          PrivateTmp = true;
+          ReadWritePaths = [ dataDir ];
+        };
+      };
+
+      # Open the receive port ONLY on the mesh interface: the LAN and the WireGuard underlay cannot
+      # reach it, only rostered mesh peers.
+      # COUPLING: `meshInterface` must match nvpn's actual runtime tun device (default utun100). Nothing
+      # in Nix eval can read that runtime name, so the operator MUST keep this option in sync with the
+      # device `keepNode.mesh` brings up; a mismatch opens the port on a non-existent iface (fail-closed:
+      # unreachable receiver) or, worse, on the wrong one. The rsyncd `hosts allow = 10.44/16` above is
+      # the defense-in-depth backstop if this drifts.
+      networking.firewall.interfaces.${cfg.meshReplication.meshInterface}.allowedTCPPorts = lib.mkIf (
+        cfg.role == "standby"
+      ) [ cfg.meshReplication.port ];
+
+      # ACTIVE: push the local replica dir to the standby over the mesh on a timer. Runs as root: it
+      # reads the mesh daemon's config (HOME) to resolve the peer's mesh IP via `nvpn ip --peer`, and
+      # reads the 0700 replica dir. Only the already-encrypted replica bytes leave, over the
+      # authenticated mesh, to exactly the rostered peer.
+      systemd.services.keep-node-vault-mesh-push = lib.mkIf (cfg.role == "active") {
+        description = "Push the vault replica to the standby over the mesh";
+        # Order (and pull in) Litestream where it runs on this node so the push does not fire against a
+        # not-yet-populated replicaDir on boot; the empty-replica guard below still covers the window.
+        after = [
+          "keep-node-mesh.service"
+        ]
+        ++ lib.optional cfg.litestream.enable "keep-node-litestream.service";
+        wants = lib.optional cfg.litestream.enable "keep-node-litestream.service";
+        path = [
+          pkgs.rsync
+          config.keepNode.mesh.package
+        ];
+        serviceConfig = {
+          Type = "oneshot";
+          Environment = "HOME=${config.keepNode.mesh.stateDir}";
+          ExecStart = pkgs.writeShellScript "keep-node-vault-mesh-push" ''
+            set -euo pipefail
+            replica=${lib.escapeShellArg cfg.litestream.replicaDir}
+            # Refuse to push an empty/absent local replica: `rsync --delete` mirrors the source, so an
+            # empty replicaDir (right after a restart before Litestream has repopulated it, or a vault-DB
+            # reset) would wipe the standby's only failover copy and make promotion impossible. Nothing
+            # to ship this cycle is not an error.
+            if [ ! -d "$replica" ] || [ -z "$(ls -A "$replica" 2>/dev/null)" ]; then
+              echo "keep-node-vault-mesh-push: local replica empty; skipping push so --delete cannot wipe the standby" >&2
+              exit 0
+            fi
+            # Resolve the single peer's mesh IP (two-node cluster). Empty until the mesh is up; a
+            # not-yet-connected mesh is not an error, just nothing to push this cycle.
+            peer="$(nvpn ip --peer --discover-secs 0 2>/dev/null | head -n1 | tr -d '[:space:]')"
+            if [ -z "$peer" ]; then
+              echo "keep-node-vault-mesh-push: no mesh peer yet; skipping this cycle" >&2
+              exit 0
+            fi
+            rsync -a --delete "$replica"/ "rsync://$peer:${toString cfg.meshReplication.port}/vault-replica/"
+          '';
+          # Bound blast radius like the sibling units: it only reads the local replica and the mesh
+          # identity dir (HOME) and pushes over the network. Keep the mesh stateDir writable in case
+          # nvpn caches runtime state there; dataDir is read only in practice but kept in the writable
+          # set for parity with the replicators.
+          NoNewPrivileges = true;
+          ProtectSystem = "strict";
+          ProtectHome = true;
+          PrivateTmp = true;
+          ReadWritePaths = [
+            dataDir
+            config.keepNode.mesh.stateDir
+          ];
+        };
+      };
+      systemd.timers.keep-node-vault-mesh-push = lib.mkIf (cfg.role == "active") {
+        wantedBy = [ "timers.target" ];
+        timerConfig = {
+          OnBootSec = "25s";
+          OnUnitActiveSec = "15s";
+          Unit = "keep-node-vault-mesh-push.service";
+        };
       };
     })
   ];

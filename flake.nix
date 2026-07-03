@@ -299,6 +299,13 @@
           imports = [ ./tests/mesh.nix ];
           _module.args.nvpnPackage = nvpn;
         };
+        mesh-replication = pkgs.testers.runNixOSTest {
+          imports = [ ./tests/mesh-replication.nix ];
+          _module.args = {
+            nvpnPackage = nvpn;
+            inherit vaultRsaKeyFixture;
+          };
+        };
       };
 
       devShells.${system}.default = pkgs.mkShell {
