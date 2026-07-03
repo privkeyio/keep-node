@@ -12,7 +12,7 @@ keep-node turns a small Linux box into a private security appliance. Each node r
 
 Part of the [Keep](https://github.com/privkeyio/keep) ecosystem; the node daemon, vault, and threshold signing are reused from [`keep`](https://github.com/privkeyio/keep) (`keep-web`, `keep-core`).
 
-> **Status: early scaffold.** Today it boots Vaultwarden and the keep-web daemon in a NixOS VM, with Vaultwarden's data on a TPM-sealed LUKS volume that auto-unlocks at boot. Making that unlock a FROST quorum (instead of TPM-only), multi-node sync, and hardware support are in progress.
+> **Status: MVP in progress, developed and CI-tested entirely in NixOS VMs (no hardware).** Built and validated so far: Vaultwarden + keep-web on a LUKS volume gated at boot, either by a TPM seal (default) or, opt-in, by a **threshold-OPRF quorum** reconstructed from a live keep relay + a second holder (tested end to end with the real `keep` binary); **opt-in measured boot** (Lanzaboote UKI, so the seal binds a real PCR 11); and **multi-node active/standby HA for the vault** , a shared JWT signing key, Litestream WAL streaming of the SQLite DB, attachment/Send file replication, and crash-then-promote failover, all covered by a two-node nixosTest. Still ahead: the production **mesh transport** between nodes (the HA tests ship the replica with a stand-in copy today), the **phone holder** and QR onboarding (the `keep-android` app; tests use a keep holder as its stand-in), moving the quorum to **2-of-3**, and running on **real hardware** (TPM 2.0 + secure element on an SBC).
 
 ## Features
 
