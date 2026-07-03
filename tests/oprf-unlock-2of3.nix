@@ -106,6 +106,10 @@
 
     kshare2 = export_share(2)
     kshare3 = export_share(3)
+    # The "either holder is survivable" claim is only meaningful if the two holders hold DISTINCT
+    # shares; if `frost export` regressed and dealt the same share twice, both legs would still pass
+    # while proving nothing. Assert distinctness so that green means what it claims.
+    assert kshare2 != kshare3, f"shares 2 and 3 are identical ({kshare2!r}); survivability proof is vacuous"
     holder.succeed(f"{env} {keep} --no-mlock --path /root/holder init")
     holder.succeed(
         f"printf '{kshare2}\\n\\nsharepass1\\n' | {env} {keep} --no-mlock --path /root/holder frost import"
@@ -161,16 +165,21 @@
     holder.succeed("systemctl stop holder-serve.service")
     holder2.succeed("systemctl stop holder2-serve.service")
 
-    oprf_unlock = (
-        f"{env} {keep} --no-mlock --path /root/box frost network oprf-unlock "
-        f"--group {npub} --relay {relay_url} --share 1 --volume-id vault0 "
-        f"--tpm-tcti device:/dev/tpmrm0 --share-file /root/box-oprf.share"
+    # The invariant oprf-unlock frost args, shared verbatim by the positive legs (unlock_key) and the
+    # negative leg C, so the fail-closed leg can never drift from the legs it must mirror. Each call
+    # site keeps its own prefix (keep binary + --path, any timeout wrapper) and redirect target.
+    oprf_unlock_args = (
+        f"frost network oprf-unlock --group {npub} --relay {relay_url} "
+        f"--share 1 --volume-id vault0 --tpm-tcti device:/dev/tpmrm0 --share-file /root/box-oprf.share"
     )
 
     def unlock_key(dst):
-        # Read-only reconstruction; retry until the sampled holder answers. Exactly one holder is
-        # online per leg, so the box's random sample is deterministic.
-        box.wait_until_succeeds(f"{oprf_unlock} > {dst}", timeout=120)
+        # Read-only reconstruction. Exactly one holder is online per leg, but the offline holder's
+        # announce lingers on the relay, so the box may still sample the absent one; the retry (not a
+        # deterministic sample) is what converges on the online holder that actually answers.
+        box.wait_until_succeeds(
+            f"{env} {keep} --no-mlock --path /root/box {oprf_unlock_args} > {dst}", timeout=120
+        )
         return box.succeed(f"od -An -v -tx1 {dst} | tr -d ' \\n'").strip()
 
     # --- Leg A: box + holder (holder2 down) reconstructs the provisioned key. ---
@@ -187,12 +196,13 @@
     # --- Leg C: box + neither holder is below threshold -> fail closed, no key material. ---
     holder2.succeed("systemctl stop holder2-serve2.service")
     box.fail(
-        f"{env} timeout 30 {keep} --no-mlock --path /root/box frost network oprf-unlock "
-        f"--group {npub} --relay {relay_url} --share 1 --volume-id vault0 "
-        f"--tpm-tcti device:/dev/tpmrm0 --share-file /root/box-oprf.share "
+        f"{env} timeout 30 {keep} --no-mlock --path /root/box {oprf_unlock_args} "
         f"> /root/neg.out 2>/root/neg.err"
     )
-    neg_size = box.succeed("stat -c %s /root/neg.out").strip()
-    assert neg_size != "32", f"below-threshold unlock leaked a 32-byte key ({neg_size} bytes)"
+    # ...and it emitted no usable key material. A size check alone (== 32) would miss a key leaked
+    # with a trailing byte or hex-encoded, so assert the provisioned key bytes never appear in the
+    # output. An empty file trivially satisfies this.
+    neg_hex = box.succeed("od -An -v -tx1 /root/neg.out | tr -d ' \\n'").strip()
+    assert provisioned not in neg_hex, "below-threshold unlock leaked the provisioned key material"
   '';
 }
