@@ -21,10 +21,12 @@
 > userspace WireGuard, Nostr-authenticated peers) is packaged and run headless by `keepNode.mesh`,
 > validated forming + carrying traffic over its `10.44.x.y` tunnel with no relay (the `mesh` test).
 > The **DB replica now rides that mesh**: with `keepNode.vaultReplication.role` and `meshReplication`,
-> the active pushes its replica dir to a standby receiver reachable ONLY on the mesh interface, and
-> the standby restores it (the `mesh-replication` test ships a probe row across the tunnel). Still to
-> move onto the mesh: the **attachment/Send files** and the full **crash+promote** (the `ha-failover`
-> test still stubs those with a copy). Also still to come: a **replication-lag** signal.
+> the active pushes its whole replica dir to a standby receiver reachable ONLY on the mesh interface,
+> and the standby restores it (the `mesh-replication` test ships a probe row across the tunnel). Because
+> `keep-node-vault-files` mirrors `attachments/`+`sends/` into that same replica dir, the
+> **attachment/Send files travel over the mesh too**, in the same push. Still to move onto the mesh: the
+> full **crash+promote** (the `ha-failover` test still stubs that with a copy). Also still to come: a
+> **replication-lag** signal.
 > This chapter inventories Vaultwarden's state and the constraints that design has to respect.
 
 Vaultwarden (1.36.x here) keeps its state under one data directory, the FROST-gated LUKS
