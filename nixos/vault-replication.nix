@@ -170,6 +170,8 @@ in
           `systemctl is-failed keep-node-vault-lag-check` reads failed) once the received heartbeat is
           older than this, or missing. Set a few push intervals above the ~15s push cadence so a
           transient hiccup does not flap; a sustained breach means the standby is falling behind.
+          The signal cross-compares the two nodes' wall clocks, so it assumes they are roughly
+          time-synced (NTP); a heartbeat dated in the future (clock skew) is treated as fresh, not stale.
         '';
       };
     };
@@ -548,21 +550,26 @@ in
           Group = "vaultwarden";
           ExecStart = pkgs.writeShellScript "keep-node-vault-lag-check" ''
             set -euo pipefail
-            hb=${lib.escapeShellArg "${cfg.litestream.replicaDir}/.push-heartbeat"}
+            heartbeat=${lib.escapeShellArg "${cfg.litestream.replicaDir}/.push-heartbeat"}
             max=${toString cfg.meshReplication.maxLagSeconds}
-            if [ ! -r "$hb" ]; then
+            if [ ! -r "$heartbeat" ]; then
               echo "keep-node-vault-lag-check: no heartbeat received yet; replication has not delivered a push" >&2
               exit 1
             fi
-            stamp="$(${pkgs.coreutils}/bin/tr -dc '0-9' < "$hb")"
+            stamp="$(${pkgs.coreutils}/bin/head -c 64 "$heartbeat" | ${pkgs.coreutils}/bin/tr -dc '0-9')"
             now="$(${pkgs.coreutils}/bin/date +%s)"
             if [ -z "$stamp" ]; then
               echo "keep-node-vault-lag-check: heartbeat unreadable" >&2
               exit 1
             fi
             lag=$(( now - stamp ))
+            # A negative lag means the active's clock leads ours (skew), not staleness: the heartbeat was just
+            # received, so treat it as fresh rather than a false alarm. Only genuine over-threshold age fails.
+            if [ "$lag" -lt 0 ]; then
+              lag=0
+            fi
             echo "vault replication lag: ''${lag}s (max ''${max}s)"
-            if [ "$lag" -gt "$max" ] || [ "$lag" -lt 0 ]; then
+            if [ "$lag" -gt "$max" ]; then
               echo "keep-node-vault-lag-check: replication lag ''${lag}s exceeds ''${max}s" >&2
               exit 1
             fi
@@ -570,7 +577,7 @@ in
           NoNewPrivileges = true;
           ProtectSystem = "strict";
           ProtectHome = true;
-          ReadWritePaths = [ dataDir ];
+          PrivateTmp = true;
         };
       };
       systemd.timers.keep-node-vault-lag-check = lib.mkIf (cfg.role == "standby") {
@@ -624,12 +631,18 @@ in
               echo "keep-node-vault-mesh-push: no mesh peer yet; skipping this cycle" >&2
               exit 0
             fi
+            # Ship the replica first, EXCLUDING the heartbeat so --delete cannot remove the standby's
+            # existing one; rsync protects excluded files from --delete by default.
+            rsync -a --delete --exclude=/.push-heartbeat "$replica"/ "rsync://$peer:${toString cfg.meshReplication.port}/vault-replica/"
             # Heartbeat for the standby's lag signal: stamp the replica with this push's wall-clock time
             # so that even an idle active (no DB writes) still refreshes it every cycle. The standby
             # compares it to its own clock to tell "a little behind" from "replication stalled". Written
-            # only here, past every skip guard, so it advances iff a real push is about to happen.
+            # and shipped only after the data rsync above succeeds, so it attests a delivered replica, not
+            # an attempted push: `set -euo pipefail` guarantees a failed data rsync aborts before this, so
+            # the standby keeps its OLD heartbeat and correctly goes stale/unhealthy rather than reading a
+            # false "in sync". It also advances iff a real push happened, past every skip guard above.
             ${pkgs.coreutils}/bin/date +%s > "$replica"/.push-heartbeat
-            rsync -a --delete "$replica"/ "rsync://$peer:${toString cfg.meshReplication.port}/vault-replica/"
+            rsync -a "$replica"/.push-heartbeat "rsync://$peer:${toString cfg.meshReplication.port}/vault-replica/"
           '';
           # Bound blast radius like the sibling units: it only reads the local replica and the mesh
           # identity dir (HOME) and pushes over the network. Keep the mesh stateDir writable in case
