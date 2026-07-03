@@ -129,10 +129,15 @@ malicious relay response therefore cannot escalate to root or read the box's oth
 (it reaches only its own FROST-share database, the TPM device, and the relay socket); the
 reconstructed 32-byte key returns over a pipe to the privileged unit that opens the volume.
 
-Inter-node replication (the planned multi-node HA) is held to the same rule: nodes replicate
-each other's encrypted state only, never plaintext and never an at-or-above-threshold set of
-shares, so a node or its sync path can degrade availability but cannot decrypt another node's
-vault. That replication is not yet implemented.
+Inter-node replication (the multi-node HA) is held to the same rule: nodes replicate each other's
+encrypted application state only, never plaintext and never an at-or-above-threshold set of shares,
+so a node or its sync path can degrade availability but cannot decrypt another node's vault. It is
+implemented and runs over the `nvpn` encrypted mesh, which authenticates peers by their Nostr
+identity (npub roster) and encrypts every hop (WireGuard); the standby's replica receiver is exposed
+only on the mesh interface, so nothing on the LAN or the WireGuard underlay can reach it. A promoted
+standby that *serves* the vault necessarily decrypts it and is therefore a fully trusted holder (a
+warm standby), exactly as the cold-vs-warm discussion in [Multi-node sync](./multi-node-sync.md)
+sets out; replication itself moves only ciphertext.
 
 ## Trust assumptions
 

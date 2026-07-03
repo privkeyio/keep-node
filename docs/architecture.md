@@ -15,7 +15,9 @@ appliance is assembled from a few NixOS modules under `nixos/`, wired together b
 - `frost-gate.nix`, the encrypted-volume gate that unseals the vault (TPM seal, or the opt-in
   threshold-OPRF quorum).
 - `vault-replication.nix`, multi-node HA: the shared JWT signing key, Litestream DB streaming,
-  attachment/Send file replication, and crash-then-promote failover.
+  attachment/Send file replication, a replication-lag health signal, and crash-then-promote failover.
+- `mesh.nix`, the encrypted node-to-node transport (nostr-vpn's `nvpn`, boringtun userspace
+  WireGuard) that replication rides between nodes.
 - `measured-boot.nix`, opt-in Lanzaboote UKI boot so the seal binds a real measured-boot PCR.
 - `ingress.nix`, an opt-in TLS reverse proxy with brute-force protection for direct HTTPS access.
 
@@ -122,12 +124,15 @@ Key custody is split across three roles in a 2-of-3 quorum:
 
 No single device, including the box, ever holds enough to decrypt the vault or to sign.
 Running two or more nodes in active/standby, so a single node failing does not take the vault
-down, is implemented by `vault-replication.nix` (see [Multi-node sync](./multi-node-sync.md)) and
-validated by the `ha-failover` test: the standby shares the active's JWT signing key, tails its DB
-(Litestream) and attachment/Send files, and on a crash a promote step restores and serves them.
-Replicas only ever exchange the application state above the LUKS layer, re-encrypted under each
-node's own volume, never plaintext or a quorum-threshold set of shares. The production cross-node
-transport (the mesh) is still pending; the tests ship the replica with a stand-in copy.
+down, is implemented by `vault-replication.nix` (see [Multi-node sync](./multi-node-sync.md)): the
+standby shares the active's JWT signing key, tails its DB (Litestream) and attachment/Send files
+over the `nvpn` encrypted mesh (`mesh.nix`), and on a crash a promote step restores and serves them.
+The `mesh-replication` test drives this end to end , replicate, propagate a deletion, crash the
+active, promote the standby , over a real mesh with no relay. Replicas only ever exchange the
+application state above the LUKS layer, re-encrypted under each node's own volume, never plaintext or
+a quorum-threshold set of shares, and the mesh authenticates peers (npub roster) and encrypts the
+hop (WireGuard). Internet NAT traversal for the mesh (nvpn's Nostr discovery + the bundled relay)
+is a deployment concern beyond the VM.
 
 ## Boot flow
 

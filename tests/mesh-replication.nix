@@ -48,6 +48,8 @@
         rsaKeyFile = "${vaultRsaKeyFixture}/rsa_key.pem";
         role = "standby";
         meshReplication.enable = true;
+        # Low threshold so the lag test can prove the healthy->stale transition without a long wait.
+        meshReplication.maxLagSeconds = 15;
       };
       environment.systemPackages = [
         pkgs.sqlite
@@ -182,6 +184,16 @@
       # that sync is additionally gated to role != "standby" (a Nix conditional) as belt-and-suspenders
       # for a misconfigured standby that enabled Litestream. ---
       standby.fail("systemctl cat keep-node-vault-files.service")
+
+      # --- Replication-lag signal: the active heartbeats the replica on each push; the standby's
+      # keep-node-vault-lag-check is healthy right after a push and goes unhealthy once pushes stop for
+      # longer than maxLagSeconds (15s here). Stop the auto-push timer so the heartbeat can actually go
+      # stale, do one fresh push, confirm healthy, then wait past the threshold and confirm unhealthy. ---
+      active.systemctl("stop keep-node-vault-mesh-push.timer")
+      active.systemctl("start keep-node-vault-mesh-push.service")
+      standby.wait_until_succeeds("systemctl start keep-node-vault-lag-check.service", timeout=15)
+      standby.succeed("sleep 20")  # exceed maxLagSeconds with no further push
+      standby.fail("systemctl start keep-node-vault-lag-check.service")
 
       # --- Crash + promote OVER THE MESH (M1 finale): lose the active, promote the standby, and it
       # serves the data it received across the tunnel. This is the milestone's Done criterion ("kill a
