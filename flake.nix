@@ -9,6 +9,16 @@
       url = "github:privkeyio/keep";
       flake = false;
     };
+    # nostr-vpn (`nvpn`): the node-to-node encrypted mesh transport (boringtun userspace WireGuard,
+    # Nostr coordination). Consumed as source and built here (no flake); pinned so the mesh binary is
+    # reproducible. Only the headless `nvpn` CLI crate is built, never the desktop GUI (which the
+    # workspace excludes anyway). Pinned to the v4.0.87 release commit: later `master` commits (the
+    # "direct TUN lanes" work) import a fips-endpoint API newer than the published 0.3.52 the lockfile
+    # pins, so they do not build from crates.io. Bump to the next tag whose Cargo.lock matches.
+    nostr-vpn = {
+      url = "github:mmalmi/nostr-vpn/9f5d7017f3e7248f9679824481f2ff7a5ca6dd83";
+      flake = false;
+    };
     treefmt-nix = {
       url = "github:numtide/treefmt-nix";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -27,6 +37,7 @@
       self,
       nixpkgs,
       keep,
+      nostr-vpn,
       treefmt-nix,
       lanzaboote,
     }:
@@ -83,6 +94,27 @@
         ];
         doCheck = false; # workspace tests, not needed to ship the binary
         meta.mainProgram = "keep";
+      };
+
+      # nvpn: the headless mesh daemon/CLI. Only the `nvpn` binary crate is built
+      # (crates/nostr-vpn-cli); the iced desktop GUI under linux/ is excluded from the workspace, so
+      # this pulls in no GTK. Default features (embedded-fips) only; `paid-exit` stays off. Deps are
+      # all crates.io (no git deps in Cargo.lock), so cargoLock needs no outputHashes. A transitive
+      # dep runs bindgen (libclang via bindgenHook) and links libdbus, hence dbus.
+      nvpn = pkgs.rustPlatform.buildRustPackage {
+        pname = "nvpn";
+        version =
+          (builtins.fromTOML (builtins.readFile "${nostr-vpn}/Cargo.toml")).workspace.package.version;
+        src = nostr-vpn;
+        cargoLock.lockFile = "${nostr-vpn}/Cargo.lock";
+        buildAndTestSubdir = "crates/nostr-vpn-cli";
+        nativeBuildInputs = [
+          pkgs.pkg-config
+          pkgs.rustPlatform.bindgenHook
+        ];
+        buildInputs = [ pkgs.dbus ];
+        doCheck = false; # workspace tests, not needed to ship the binary
+        meta.mainProgram = "nvpn";
       };
 
       # A pre-generated FROST 2-of-2 group so a test can drive the frost-gate OPRF mode end to end.
@@ -202,7 +234,7 @@
     in
     {
       packages.${system} = {
-        inherit keep-web keep-cli;
+        inherit keep-web keep-cli nvpn;
         default = keep-web;
         # `nix build .#installer-iso` -> result/iso/*.iso ; dd it to a USB stick.
         installer-iso = installerSystem.config.system.build.isoImage;
@@ -262,6 +294,10 @@
         ha-failover = pkgs.testers.runNixOSTest {
           imports = [ ./tests/ha-failover.nix ];
           _module.args.vaultRsaKeyFixture = vaultRsaKeyFixture;
+        };
+        mesh = pkgs.testers.runNixOSTest {
+          imports = [ ./tests/mesh.nix ];
+          _module.args.nvpnPackage = nvpn;
         };
       };
 

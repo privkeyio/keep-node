@@ -109,6 +109,23 @@
         "type": "github"
       }
     },
+    "nostr-vpn": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1782149358,
+        "narHash": "sha256-iB6IBGHVDEftVcwZOQVmaZNYYmd+VXEpc4dTzAb8Vo0=",
+        "owner": "mmalmi",
+        "repo": "nostr-vpn",
+        "rev": "9f5d7017f3e7248f9679824481f2ff7a5ca6dd83",
+        "type": "github"
+      },
+      "original": {
+        "owner": "mmalmi",
+        "repo": "nostr-vpn",
+        "rev": "9f5d7017f3e7248f9679824481f2ff7a5ca6dd83",
+        "type": "github"
+      }
+    },
     "pre-commit": {
       "inputs": {
         "flake-compat": "flake-compat",
@@ -137,6 +154,7 @@
         "keep": "keep",
         "lanzaboote": "lanzaboote",
         "nixpkgs": "nixpkgs",
+        "nostr-vpn": "nostr-vpn",
         "treefmt-nix": "treefmt-nix"
       }
     },
