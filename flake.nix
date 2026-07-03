@@ -274,6 +274,10 @@
           imports = [ ./tests/oprf-unlock.nix ];
           _module.args.keepCliPackage = keep-cli;
         };
+        oprf-unlock-2of3 = pkgs.testers.runNixOSTest {
+          imports = [ ./tests/oprf-unlock-2of3.nix ];
+          _module.args.keepCliPackage = keep-cli;
+        };
         measured-boot = pkgs.testers.runNixOSTest {
           imports = [ ./tests/measured-boot.nix ];
           _module.args.lanzaboote = lanzaboote;
