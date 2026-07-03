@@ -110,6 +110,23 @@
       active.succeed("sleep 4")  # a couple of Litestream sync cycles
       active.succeed("test -n \"$(ls -A /var/lib/vaultwarden/replica 2>/dev/null)\"")
 
+      # --- Drop a probe attachment; the local file-sync mirrors it into the SAME replica dir, so the
+      # single push below carries the attachment/Send files over the mesh alongside the DB replica. ---
+      active.succeed(
+          "install -d -o vaultwarden -g vaultwarden -m 0700 /var/lib/vaultwarden/attachments/probe-cipher && "
+          "echo 'mesh-attach-marker' > /tmp/pf && install -o vaultwarden -g vaultwarden -m 0600 "
+          "/tmp/pf /var/lib/vaultwarden/attachments/probe-cipher/probe-file"
+      )
+      # ...and a Send probe, so sends/ (not just attachments/) is proven to cross the mesh too.
+      active.succeed(
+          "install -d -o vaultwarden -g vaultwarden -m 0700 /var/lib/vaultwarden/sends && "
+          "echo 'mesh-send-marker' > /tmp/sf && install -o vaultwarden -g vaultwarden -m 0600 "
+          "/tmp/sf /var/lib/vaultwarden/sends/probe-send"
+      )
+      active.systemctl("start keep-node-vault-files.service")
+      active.succeed("test -f /var/lib/vaultwarden/replica/attachments/probe-cipher/probe-file")
+      active.succeed("test -f /var/lib/vaultwarden/replica/sends/probe-send")
+
       # --- Push the replica to the standby OVER THE MESH (trigger the unit rather than wait the timer).
       # The standby's receiver is reachable only on the mesh interface. ---
       standby.wait_for_unit("keep-node-vault-receive.service")
@@ -123,5 +140,40 @@
       standby.succeed("litestream restore -o /tmp/restored.db file:///var/lib/vaultwarden/replica")
       got = standby.succeed("sqlite3 /tmp/restored.db 'SELECT x FROM ha_probe'").strip()
       assert got == "m1-mesh-db-marker", f"DB replica did not cross the mesh: {got!r}"
+
+      # ...and the attachment file rode the same push over the mesh.
+      standby.wait_until_succeeds(
+          "test -f /var/lib/vaultwarden/replica/attachments/probe-cipher/probe-file", timeout=30
+      )
+      attach = standby.succeed(
+          "cat /var/lib/vaultwarden/replica/attachments/probe-cipher/probe-file"
+      ).strip()
+      assert attach == "mesh-attach-marker", f"attachment did not cross the mesh: {attach!r}"
+
+      # ...and the Send probe rode the same push over the mesh.
+      standby.wait_until_succeeds(
+          "test -f /var/lib/vaultwarden/replica/sends/probe-send", timeout=30
+      )
+      send = standby.succeed("cat /var/lib/vaultwarden/replica/sends/probe-send").strip()
+      assert send == "mesh-send-marker", f"Send did not cross the mesh: {send!r}"
+
+      # --- Deletion propagation: `rsync --delete` on the active push path must remove files the
+      # standby holds once they leave the active. Delete the probe attachment on the active, re-run the
+      # local file-sync (drops it from the active's replica) then the mesh push, and assert it vanishes
+      # from the standby's replica -- proving --delete actually propagates deletions across the mesh. ---
+      active.succeed("rm -f /var/lib/vaultwarden/attachments/probe-cipher/probe-file")
+      active.systemctl("start keep-node-vault-files.service")
+      active.succeed("test ! -e /var/lib/vaultwarden/replica/attachments/probe-cipher/probe-file")
+      active.systemctl("start keep-node-vault-mesh-push.service")
+      standby.wait_until_succeeds(
+          "test ! -e /var/lib/vaultwarden/replica/attachments/probe-cipher/probe-file", timeout=30
+      )
+
+      # --- Role gate (keep-node-0z7): a standby must not wipe the files it received. The primary
+      # protection is that the standby runs NO local file-sync (keep-node-vault-files is active-only,
+      # under litestream.enable) -- assert the unit is not even instantiated here. The `--delete` in
+      # that sync is additionally gated to role != "standby" (a Nix conditional) as belt-and-suspenders
+      # for a misconfigured standby that enabled Litestream. ---
+      standby.fail("systemctl cat keep-node-vault-files.service")
     '';
 }

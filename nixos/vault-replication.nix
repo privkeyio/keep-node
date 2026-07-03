@@ -68,7 +68,14 @@ let
     max connections = 4
     [vault-replica]
       path = ${cfg.litestream.replicaDir}
+      # Accept the active's push (an upload) but refuse any pull: `read only = false` alone still
+      # serves downloads, so without `write only = true` any 10.44/16 peer could `rsync`/`litestream
+      # restore` the whole vault replica out. The active only ever uploads, so this does not block it.
       read only = false
+      write only = true
+      # Pin munge symlinks so a pushing peer cannot plant traversing/absolute symlinks into
+      # replicaDir; do not rely on the implicit default that only holds while `use chroot = false`.
+      munge symlinks = true
       hosts allow = 10.44.0.0/16
       hosts deny = *
   '';
@@ -311,10 +318,11 @@ in
             set -euo pipefail
             ${pkgs.coreutils}/bin/install -d -m 0700 ${lib.escapeShellArg cfg.litestream.replicaDir}
             # --delete makes this node's local dataDir the source of truth: a file absent from dataDir
-            # is deleted from the replica. This unit therefore assumes it runs on the ACTIVE node whose
-            # dataDir is authoritative. Once cross-node transport lands (tracked separately), a standby
-            # receiving peer files into replicaDir while its own dataDir is empty would have them wiped
-            # here; that increment MUST make --delete role-aware before running this on a standby.
+            # is deleted from the replica. That is correct ONLY on a node whose dataDir is authoritative
+            # (active or single-node). On a standby, replicaDir holds files the active pushed over the
+            # mesh while this node's own dataDir is empty, so --delete here would wipe the received
+            # replica. It is therefore gated to role != "standby" below (interpolated in): a standby
+            # that ever ran this sync adds nothing and removes nothing, leaving the received files intact.
             for sub in attachments sends; do
               # Vaultwarden creates these only on first attachment/Send; ensure the source exists so
               # rsync never errors on a missing source, but with mkdir (not install -m) so we never
@@ -328,7 +336,9 @@ in
               # due to error"). Both are benign here and self-heal next cycle, so treat them as success;
               # fail the oneshot only on any other non-zero code.
               rc=0
-              ${pkgs.rsync}/bin/rsync -a --delete ${lib.escapeShellArg dataDir}/"$sub"/ ${lib.escapeShellArg cfg.litestream.replicaDir}/"$sub"/ || rc=$?
+              ${pkgs.rsync}/bin/rsync -a ${
+                lib.optionalString (cfg.role != "standby") "--delete "
+              }${lib.escapeShellArg dataDir}/"$sub"/ ${lib.escapeShellArg cfg.litestream.replicaDir}/"$sub"/ || rc=$?
               case "$rc" in
                 0 | 23 | 24) ;;
                 *) exit "$rc" ;;
@@ -536,12 +546,16 @@ in
           ExecStart = pkgs.writeShellScript "keep-node-vault-mesh-push" ''
             set -euo pipefail
             replica=${lib.escapeShellArg cfg.litestream.replicaDir}
-            # Refuse to push an empty/absent local replica: `rsync --delete` mirrors the source, so an
-            # empty replicaDir (right after a restart before Litestream has repopulated it, or a vault-DB
-            # reset) would wipe the standby's only failover copy and make promotion impossible. Nothing
-            # to ship this cycle is not an error.
-            if [ ! -d "$replica" ] || [ -z "$(ls -A "$replica" 2>/dev/null)" ]; then
-              echo "keep-node-vault-mesh-push: local replica empty; skipping push so --delete cannot wipe the standby" >&2
+            # Refuse to push until the local replica holds a restorable Litestream generation:
+            # `rsync --delete` mirrors the source, so shipping a DB-less replicaDir would wipe the
+            # standby's only failover DB copy and make promotion impossible. Mere non-emptiness is too
+            # weak a guard because keep-node-vault-files pre-creates replicaDir/{attachments,sends}, so
+            # replicaDir is non-empty even before any DB generation exists. Litestream's file replica
+            # (v0.5 layout) becomes restorable only once it writes LTX files under replicaDir/ltx/
+            # (ltx/<level>/<txn>.ltx), so gate on an actual .ltx file. Nothing to ship is not an error.
+            set -- "$replica"/ltx/*/*.ltx
+            if [ ! -e "$1" ]; then
+              echo "keep-node-vault-mesh-push: no restorable DB generation in local replica; skipping push so --delete cannot wipe the standby" >&2
               exit 0
             fi
             # Resolve the single peer's mesh IP (two-node cluster). Empty until the mesh is up; a
