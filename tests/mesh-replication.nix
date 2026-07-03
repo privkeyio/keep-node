@@ -24,6 +24,7 @@
         package = nvpnPackage;
       };
       keepNode.vaultReplication = {
+        # Test-only anti-pattern (exactly what rsaKeyFile warns against): a Nix-store path leaves the key world-readable in /nix/store. Safe only because this is an ephemeral per-build fixture, never a real cluster signing key; a real deploy must pass an out-of-band path.
         rsaKeyFile = "${vaultRsaKeyFixture}/rsa_key.pem";
         litestream.enable = true;
         role = "active";
@@ -43,6 +44,7 @@
         package = nvpnPackage;
       };
       keepNode.vaultReplication = {
+        # Test-only anti-pattern (exactly what rsaKeyFile warns against): a Nix-store path leaves the key world-readable in /nix/store. Safe only because this is an ephemeral per-build fixture, never a real cluster signing key; a real deploy must pass an out-of-band path.
         rsaKeyFile = "${vaultRsaKeyFixture}/rsa_key.pem";
         role = "standby";
         meshReplication.enable = true;
@@ -134,9 +136,12 @@
       standby.wait_for_unit("keep-node-vault-receive.service")
       active.systemctl("start keep-node-vault-mesh-push.service")
 
-      # --- The standby received the DB replica over the mesh; restoring it yields the probe row. ---
+      # --- The standby received the DB replica over the mesh; restoring it yields the probe row. A
+      # Litestream file replica has no top-level db.sqlite3 (its layout is ltx/<level>/<txn>.ltx), so
+      # gate on the replica dir being non-empty; the push is a synchronous oneshot and the row query
+      # below is the strong check. ---
       standby.wait_until_succeeds(
-          "test -e /var/lib/vaultwarden/replica/db.sqlite3 || test -n \"$(ls -A /var/lib/vaultwarden/replica 2>/dev/null)\"",
+          "test -n \"$(ls -A /var/lib/vaultwarden/replica 2>/dev/null)\"",
           timeout=30,
       )
       standby.succeed("litestream restore -o /tmp/restored.db file:///var/lib/vaultwarden/replica")
@@ -182,15 +187,20 @@
       # serves the data it received across the tunnel. This is the milestone's Done criterion ("kill a
       # node, assert continued service") over a REAL transport, not the base64 stand-in. ---
       active.crash()
-      standby.systemctl("start keep-node-vault-promote.service")
+      # UNCOVERED here: promote's replication-resume step (start keep-node-litestream.service +
+      # keep-node-vault-files.timer) is gated on litestream.enable, which the standby leaves off, so
+      # it compiles to empty and is not exercised. Reconfiguring the promoted node to enable Litestream
+      # just to cover it would risk flakiness; the gap is documented, not closed.
+      # Use succeed() so a promote failure fails fast and locally, not as a later "no such table".
+      standby.succeed("systemctl start keep-node-vault-promote.service")
       standby.wait_for_unit("vaultwarden.service")
       standby.wait_for_open_port(8222)
       standby.succeed("curl -fsS http://localhost:8222/alive")
 
       # The promoted node serves the mesh-delivered data from its LIVE vault: the DB row and the Send
       # file are present; the attachment is correctly ABSENT (its deletion propagated over the mesh
-      # above); and the shared JWT key -- which lets the dead active's sessions keep validating -- is
-      # unchanged by promotion.
+      # above); and, as a regression guard, the shared JWT key FILE is byte-unchanged by promotion
+      # (promote never touches it). This confirms the shared key is preserved, not a live token round-trip.
       promoted = standby.succeed(
           "sqlite3 /var/lib/vaultwarden/db.sqlite3 'SELECT x FROM ha_probe'"
       ).strip()
