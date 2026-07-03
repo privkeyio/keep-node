@@ -69,8 +69,9 @@ in
       # Deliberately NOT wantedBy multi-user.target in this increment: the mesh identity (`nvpn init`)
       # and the peer roster/endpoints (`nvpn set`) are provisioned first (by onboarding, or by the
       # test), then this is started. A later increment provisions them declaratively and enables it at
-      # boot; it will also fully confine the daemon behind a dedicated `User=` (this still runs as root
-      # for now to reach /dev/net/tun and to read the root-provisioned config).
+      # boot. The daemon still runs as root (opening /dev/net/tun needs it here), but its filesystem
+      # blast radius is locked down below; dropping to a dedicated non-root User= is the remaining
+      # hardening step (blocked on making /dev/net/tun reachable without uid 0).
       serviceConfig = {
         ExecStart = "${lib.getExe cfg.package} connect";
         # nvpn reads $HOME/.config/nvpn/config.toml.
@@ -84,6 +85,17 @@ in
         CapabilityBoundingSet = [ "CAP_NET_ADMIN" ];
         AmbientCapabilities = [ "CAP_NET_ADMIN" ];
         NoNewPrivileges = true;
+        # Filesystem confinement: the daemon parses hostile WireGuard/Nostr traffic, so a memory-safety
+        # bug in boringtun must not be able to read the box's other secrets or write arbitrary files.
+        # ProtectSystem=strict makes the whole fs read-only except ReadWritePaths (only the mesh
+        # identity dir); ProtectHome hides /root and /home; PrivateTmp isolates /tmp. The tun device is
+        # allow-listed explicitly (DevicePolicy=closed denies all other device nodes).
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        PrivateTmp = true;
+        ReadWritePaths = [ cfg.stateDir ];
+        DevicePolicy = "closed";
+        DeviceAllow = [ "/dev/net/tun rw" ];
       };
     };
   };
