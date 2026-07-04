@@ -69,8 +69,9 @@ in
       # Deliberately NOT wantedBy multi-user.target in this increment: the mesh identity (`nvpn init`)
       # and the peer roster/endpoints (`nvpn set`) are provisioned first (by onboarding, or by the
       # test), then this is started. A later increment provisions them declaratively and enables it at
-      # boot; it will also fully confine the daemon behind a dedicated `User=` (this still runs as root
-      # for now to reach /dev/net/tun and to read the root-provisioned config).
+      # boot. The daemon still runs as root (opening /dev/net/tun needs it here), but its filesystem
+      # blast radius is locked down below; dropping to a dedicated non-root User= is the remaining
+      # hardening step (blocked on making /dev/net/tun reachable without uid 0).
       serviceConfig = {
         ExecStart = "${lib.getExe cfg.package} connect";
         # nvpn reads $HOME/.config/nvpn/config.toml.
@@ -84,6 +85,50 @@ in
         CapabilityBoundingSet = [ "CAP_NET_ADMIN" ];
         AmbientCapabilities = [ "CAP_NET_ADMIN" ];
         NoNewPrivileges = true;
+        # Filesystem confinement: the daemon parses hostile WireGuard/Nostr traffic, so a memory-safety
+        # bug in boringtun must not be able to write arbitrary files or tamper with the rest of the box.
+        # ProtectSystem=strict makes the whole fs read-only except ReadWritePaths (only the mesh
+        # identity dir); ProtectHome hides /root and /home; PrivateTmp isolates /tmp. The tun device is
+        # allow-listed explicitly (DevicePolicy=closed denies all other device nodes). This is
+        # write/integrity confinement, NOT confidentiality: while still running as root the daemon can
+        # READ any other root-readable secret on disk (ProtectSystem only remounts read-only, it hides
+        # nothing beyond /root and /home) -- closing that read gap is the job of the deferred non-root
+        # User= drop, under which DAC alone denies a compromised daemon those root-owned key files. A
+        # later host-DNS increment (nvpn's `.fips` resolver writes /etc/systemd/resolved.conf.d) will
+        # also need those /etc paths added here; the static relay-less mesh in this increment does not.
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        PrivateTmp = true;
+        ReadWritePaths = [ cfg.stateDir ];
+        DevicePolicy = "closed";
+        DeviceAllow = [ "/dev/net/tun rw" ];
+        # Kernel- and syscall-surface confinement against that same boringtun-RCE threat, mirroring the
+        # Rust relay client hardened in frost-gate.nix. Address families: AF_INET/AF_INET6 for the UDP
+        # underlay, AF_NETLINK for the `ip` interface/route setup, AF_UNIX for local libc lookups; every
+        # other family is denied (no AF_PACKET raw sniffing, no AF_ALG). @system-service is the standard
+        # service syscall allow-set; boringtun is pure-Rust with no JIT, so MemoryDenyWriteExecute blocks
+        # injected shellcode without breaking it. ProtectKernelModules is safe because `tun` is loaded at
+        # boot (boot.kernelModules above), so the daemon never needs to load a module itself.
+        SystemCallFilter = [ "@system-service" ];
+        SystemCallArchitectures = "native";
+        RestrictAddressFamilies = [
+          "AF_UNIX"
+          "AF_NETLINK"
+          "AF_INET"
+          "AF_INET6"
+        ];
+        RestrictNamespaces = true;
+        LockPersonality = true;
+        MemoryDenyWriteExecute = true;
+        RestrictRealtime = true;
+        RestrictSUIDSGID = true;
+        ProtectKernelTunables = true;
+        ProtectKernelModules = true;
+        ProtectKernelLogs = true;
+        ProtectControlGroups = true;
+        ProtectHostname = true;
+        ProtectProc = "invisible";
+        ProcSubset = "pid";
       };
     };
   };
