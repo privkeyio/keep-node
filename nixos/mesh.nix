@@ -16,6 +16,9 @@ let
   # persisted in the clear: it has to live on the mounted encrypted volume, and never be written to the
   # bare root fs if the gate failed to unlock. Same fail-closed rule the rsa-key installer follows.
   gateEnabled = config.keepNode.frostGate.enable or false;
+  # The gate mounts the decrypted LUKS mapper here; the prepare guard requires the identity dir to be
+  # backed by exactly this device, matching the frost-gate mount guard.
+  mapperDevice = "/dev/mapper/${config.keepNode.frostGate.mapperName or "keep-vault"}";
 in
 {
   options.keepNode.mesh = {
@@ -40,8 +43,8 @@ in
         HOME for the nvpn daemon: its Nostr mesh identity (`.config/nvpn/config.toml`, a secret key)
         lives here. On a FROST-gated node this MUST sit on the encrypted volume (e.g. a subdirectory of
         `keepNode.frostGate.dataDir`), so the mesh private key is not persisted in the clear; a
-        fail-closed guard refuses to start the mesh if it resolves to the unencrypted root fs while the
-        gate is enabled. Defaults to a plain state dir, correct for an ungated bring-up node.
+        fail-closed guard refuses to start the mesh unless it resolves onto the encrypted mapper while
+        the gate is enabled. Defaults to a plain state dir, correct for an ungated bring-up node.
       '';
     };
   };
@@ -91,14 +94,16 @@ in
         set -euo pipefail
         d=${lib.escapeShellArg cfg.stateDir}
         # `findmnt -T` needs an existing path, and the identity dir does not exist yet on first run, so
-        # walk up to the nearest existing ancestor and resolve the mount backing THAT. When the gate
-        # unlocked, the ancestor is the mounted encrypted volume; a gate that failed to unlock leaves
-        # it on the root fs ("/") -> fail closed rather than persist the mesh key in cleartext.
+        # walk up to the nearest existing ancestor and resolve the SOURCE device backing THAT. Require
+        # it to be the encrypted mapper: a gate that failed to unlock leaves the ancestor on the root fs,
+        # and a bind mount / tmpfs / second unencrypted partition would otherwise pass a mere "not /"
+        # check -> demand the exact mapper device instead, so anything but the mounted encrypted volume
+        # fails closed rather than persist the mesh key in cleartext. Matches the frost-gate mount guard.
         p="$d"
         while [ ! -e "$p" ] && [ "$p" != "/" ]; do p="$(dirname "$p")"; done
-        mnt="$(findmnt -nro TARGET -T "$p" 2>/dev/null || echo /)"
-        if [ "$mnt" = "/" ]; then
-          echo "keep-node-mesh-prepare: identity dir $d is on the unencrypted root fs (FROST gate enabled); refusing to persist the mesh private key in cleartext. Set keepNode.mesh.stateDir onto the encrypted volume." >&2
+        src="$(findmnt -nro SOURCE -T "$p" 2>/dev/null || echo none)"
+        if [ "$src" != ${lib.escapeShellArg mapperDevice} ]; then
+          echo "keep-node-mesh-prepare: identity dir $d is not on the encrypted volume (backing device '$src', expected ${mapperDevice}); refusing to persist the mesh private key in cleartext. Set keepNode.mesh.stateDir onto the encrypted volume (a subdirectory of keepNode.frostGate.dataDir)." >&2
           exit 1
         fi
         install -d -m 0700 "$d"
