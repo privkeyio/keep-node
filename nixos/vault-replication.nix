@@ -19,19 +19,25 @@ let
   # Whether the FROST gate encrypts this data dir. When it does, the shared signing key must only
   # be written after the LUKS volume is mounted, never onto the unencrypted root fs.
   gateEnabled = config.keepNode.frostGate.enable or false;
+  # The decrypted LUKS mapper the FROST gate mounts at dataDir. The guard requires dataDir to be
+  # backed by exactly this device (not merely "a mountpoint"), matching the frost-gate and mesh guards.
+  mapperDevice = "/dev/mapper/${config.keepNode.frostGate.mapperName or "keep-vault"}";
   # Fail-closed mount guard shared by the litestream + vault-files replicators. On a gated node it
   # refuses to run unless the FROST LUKS volume is actually mounted at dataDir, so a failed unlock
-  # never persists vault data on unencrypted disk. The `+` prefix runs it OUTSIDE the unit's mount
-  # namespace: ProtectSystem/ReadWritePaths bind-mounts dataDir inside the sandbox, so an in-namespace
-  # `mountpoint` would read as mounted even when the LUKS volume is absent; running on the host mount
-  # table makes the check real. Uses an absolute mountpoint path since `+` execs do not get the unit
-  # `path`. Callers wrap this in `lib.optional gateEnabled`.
+  # never persists vault data on unencrypted disk. It pins the exact backing device (the encrypted
+  # mapper): a bind mount, tmpfs, or second unencrypted partition landing at dataDir would pass a mere
+  # `mountpoint` check but must NOT be trusted with the vault DB replica -- so anything but the mapper
+  # fails closed. The `+` prefix runs it OUTSIDE the unit's mount namespace: ProtectSystem/ReadWritePaths
+  # bind-mounts dataDir inside the sandbox, so an in-namespace check would read as mounted even when the
+  # LUKS volume is absent; running on the host mount table makes the check real. Uses absolute paths
+  # since `+` execs do not get the unit `path`. Callers wrap this in `lib.optional gateEnabled`.
   mkMountGuard =
     { name, msg }:
     "+"
     + pkgs.writeShellScript name ''
       set -euo pipefail
-      if ! ${pkgs.util-linux}/bin/mountpoint -q ${lib.escapeShellArg dataDir}; then
+      src="$(${pkgs.util-linux}/bin/findmnt -nro SOURCE ${lib.escapeShellArg dataDir} 2>/dev/null || echo none)"
+      if [ "$src" != ${lib.escapeShellArg mapperDevice} ]; then
         echo ${lib.escapeShellArg msg} >&2
         exit 1
       fi
@@ -201,7 +207,7 @@ in
         # the cluster-wide RSA private key is never written to unencrypted disk. Mirrors the `requires`
         # that vaultwarden.service itself places on the gate.
         requires = lib.optional gateEnabled "keep-node-frost-gate.service";
-        # `mountpoint` (util-linux) is not on the default service PATH; the guard below needs it.
+        # `findmnt` (util-linux) is not on the default service PATH; the guard below needs it.
         path = lib.optional gateEnabled pkgs.util-linux;
         serviceConfig = {
           Type = "oneshot";
@@ -212,10 +218,13 @@ in
           d=${lib.escapeShellArg dataDir}
           ${lib.optionalString gateEnabled ''
             # Defense in depth beside the `requires` above: only write onto the mounted, encrypted
-            # volume. If the gate somehow "succeeded" without mounting, fail closed rather than persist
-            # the shared signing key on the unencrypted root fs.
-            if ! mountpoint -q "$d"; then
-              echo "keep-node-vault-rsa-key: $d is not a mountpoint (FROST volume not mounted); refusing to write key to unencrypted disk" >&2
+            # volume. Pin the exact encrypted mapper (not a bare `mountpoint` check) so a bind mount,
+            # tmpfs, or second unencrypted partition landing at dataDir cannot be trusted with the
+            # cluster-wide signing key -- matching the litestream/promote/receive guards. If the gate
+            # somehow "succeeded" without mounting, fail closed rather than persist the key in cleartext.
+            src="$(findmnt -nro SOURCE "$d" 2>/dev/null || echo none)"
+            if [ "$src" != ${lib.escapeShellArg mapperDevice} ]; then
+              echo "keep-node-vault-rsa-key: $d is not backed by the encrypted mapper (FROST volume not mounted); refusing to write key to unencrypted disk" >&2
               exit 1
             fi
           ''}
@@ -281,7 +290,7 @@ in
             # runs `+`-prefixed on the host mount table.
             lib.optional gateEnabled (mkMountGuard {
               name = "keep-node-litestream-mount-guard";
-              msg = "keep-node-litestream: ${dataDir} is not a mountpoint (FROST volume not mounted); refusing to write the vault-DB replica to unencrypted disk";
+              msg = "keep-node-litestream: ${dataDir} is not backed by the encrypted mapper (FROST volume not mounted); refusing to write the vault-DB replica to unencrypted disk";
             })
             # vaultwarden.service's StateDirectory creates dataDir at 0700; pre-create the replica
             # subdir 0700 so Litestream never widens it (it would create 0755). This runs as the
@@ -326,7 +335,7 @@ in
           # sensitive) files onto unencrypted disk when the gate failed to mount. See mkMountGuard.
           ExecStartPre = lib.optional gateEnabled (mkMountGuard {
             name = "keep-node-vault-files-mount-guard";
-            msg = "keep-node-vault-files: ${dataDir} is not a mountpoint (FROST volume not mounted); refusing to mirror vault files to unencrypted disk";
+            msg = "keep-node-vault-files: ${dataDir} is not backed by the encrypted mapper (FROST volume not mounted); refusing to mirror vault files to unencrypted disk";
           });
           ExecStart = pkgs.writeShellScript "keep-node-vault-files-sync" ''
             set -euo pipefail
@@ -404,17 +413,60 @@ in
         path = [
           pkgs.coreutils
           pkgs.systemd
-        ]
-        # `mountpoint` (util-linux) is not on the default service PATH; the guard below needs it.
-        ++ lib.optional gateEnabled pkgs.util-linux;
+        ];
         serviceConfig = {
           Type = "oneshot";
           # Fail-closed guard mirroring the replicators: refuse to restore the plaintext vault onto
           # unencrypted disk when the gate failed to mount. See mkMountGuard for the `+`-prefix reason.
           ExecStartPre = lib.optional gateEnabled (mkMountGuard {
             name = "keep-node-vault-promote-mount-guard";
-            msg = "keep-node-vault-promote: ${dataDir} is not a mountpoint (FROST volume not mounted); refusing to restore the vault to unencrypted disk";
+            msg = "keep-node-vault-promote: ${dataDir} is not backed by the encrypted mapper (FROST volume not mounted); refusing to restore the vault to unencrypted disk";
           });
+          # This unit parses bytes a mesh PEER pushed into replicaDir: `litestream restore` (LTX),
+          # `sqlite3` (an attacker-derived DB), and the content `rsync`. That is exactly the receiver's
+          # untrusted input, but promote historically ran it as UNCONFINED root. Confine it like the
+          # rest: it stays root only for `systemctl stop/start vaultwarden` (reaches PID1 over
+          # /run/systemd/private, fine under ProtectSystem=strict) and the `chown`/`chmod` of restored
+          # files, but the parser blast radius is now bounded -- a memory-safety RCE in
+          # sqlite/rsync/litestream can no longer write outside the data dir, exec injected pages, or
+          # open arbitrary sockets.
+          ProtectSystem = "strict";
+          ReadWritePaths = [ dataDir ];
+          ProtectHome = true;
+          PrivateTmp = true;
+          NoNewPrivileges = true;
+          # Runs as root, but only to cross the vaultwarden-owned 0700 data dir and fix ownership of the
+          # restored files: CAP_DAC_OVERRIDE to read/write across that tree, CAP_CHOWN for `chown -R`,
+          # CAP_FOWNER for rsync's `--chmod` on files it does not own. Drop everything else so a parser
+          # RCE cannot hold CAP_SYS_RAWIO/CAP_MKNOD; PrivateDevices then scrubs /dev to a minimal set so
+          # the raw block-device nodes (/dev/vda, the LUKS mapper) it would otherwise own are gone too --
+          # closing the ProtectSystem=strict bypass of writing the raw disk directly.
+          CapabilityBoundingSet = [
+            "CAP_CHOWN"
+            "CAP_DAC_OVERRIDE"
+            "CAP_FOWNER"
+          ];
+          AmbientCapabilities = [ ];
+          PrivateDevices = true;
+          SystemCallFilter = [ "@system-service" ];
+          SystemCallArchitectures = "native";
+          # systemctl (AF_UNIX) + any netlink from the tools; no AF_INET (restore/rsync are local).
+          RestrictAddressFamilies = [
+            "AF_UNIX"
+            "AF_NETLINK"
+          ];
+          MemoryDenyWriteExecute = true;
+          RestrictNamespaces = true;
+          LockPersonality = true;
+          RestrictRealtime = true;
+          RestrictSUIDSGID = true;
+          ProtectKernelTunables = true;
+          ProtectKernelModules = true;
+          ProtectKernelLogs = true;
+          ProtectControlGroups = true;
+          ProtectHostname = true;
+          ProtectProc = "invisible";
+          ProcSubset = "pid";
         };
         script = ''
           set -euo pipefail
@@ -508,7 +560,7 @@ in
             # unencrypted disk. See mkMountGuard for why it runs `+`-prefixed on the host mount table.
             lib.optional gateEnabled (mkMountGuard {
               name = "keep-node-vault-receive-mount-guard";
-              msg = "keep-node-vault-receive: ${dataDir} is not a mountpoint (FROST volume not mounted); refusing to receive the vault-DB replica onto unencrypted disk";
+              msg = "keep-node-vault-receive: ${dataDir} is not backed by the encrypted mapper (FROST volume not mounted); refusing to receive the vault-DB replica onto unencrypted disk";
             })
             # Pre-create replicaDir (the standby runs no Litestream to create it) at 0700.
             ++ [
@@ -517,12 +569,38 @@ in
           ExecStart = "${pkgs.rsync}/bin/rsync --daemon --no-detach --port=${toString cfg.meshReplication.port} --config=${rsyncdConf}";
           Restart = "on-failure";
           RestartSec = 2;
-          # Bound blast radius: no privilege escalation, read-only fs except the data dir.
+          # Bound blast radius: this rsync --daemon is a C parser exposed to any mesh peer, so match the
+          # mesh daemon's confinement (it parses less-trusted input yet was harder). No privilege
+          # escalation, read-only fs except the data dir, plus the syscall/kernel/namespace lockdown.
           NoNewPrivileges = true;
           ProtectSystem = "strict";
           ProtectHome = true;
           PrivateTmp = true;
+          # This is the single most attacker-reachable parser (a C rsync daemon a hostile peer connects
+          # to); scrub /dev so a memory-safety bug cannot reach any world/group-accessible device node.
+          PrivateDevices = true;
           ReadWritePaths = [ dataDir ];
+          SystemCallFilter = [ "@system-service" ];
+          SystemCallArchitectures = "native";
+          # AF_INET/AF_INET6 for the mesh TCP it serves, AF_UNIX/AF_NETLINK for libc/local lookups.
+          RestrictAddressFamilies = [
+            "AF_UNIX"
+            "AF_NETLINK"
+            "AF_INET"
+            "AF_INET6"
+          ];
+          MemoryDenyWriteExecute = true;
+          RestrictNamespaces = true;
+          LockPersonality = true;
+          RestrictRealtime = true;
+          RestrictSUIDSGID = true;
+          ProtectKernelTunables = true;
+          ProtectKernelModules = true;
+          ProtectKernelLogs = true;
+          ProtectControlGroups = true;
+          ProtectHostname = true;
+          ProtectProc = "invisible";
+          ProcSubset = "pid";
         };
       };
 
@@ -665,6 +743,35 @@ in
             dataDir
             config.keepNode.mesh.stateDir
           ];
+          # The push runs as root to traverse the vaultwarden-owned 0700 replica dir and stamp
+          # .push-heartbeat into it, so it keeps exactly CAP_DAC_OVERRIDE (DAC bypass across that tree)
+          # and nothing else -- dropping the rest, notably CAP_SYS_RAWIO/CAP_MKNOD. PrivateDevices then
+          # scrubs /dev so a bug handling `nvpn ip` output or rsync replies cannot open the raw
+          # block-device nodes root would otherwise own. AF_INET/6 for the outbound push, AF_UNIX/
+          # AF_NETLINK for libc/local lookups.
+          CapabilityBoundingSet = [ "CAP_DAC_OVERRIDE" ];
+          AmbientCapabilities = [ ];
+          PrivateDevices = true;
+          SystemCallFilter = [ "@system-service" ];
+          SystemCallArchitectures = "native";
+          RestrictAddressFamilies = [
+            "AF_UNIX"
+            "AF_NETLINK"
+            "AF_INET"
+            "AF_INET6"
+          ];
+          MemoryDenyWriteExecute = true;
+          RestrictNamespaces = true;
+          LockPersonality = true;
+          RestrictRealtime = true;
+          RestrictSUIDSGID = true;
+          ProtectKernelTunables = true;
+          ProtectKernelModules = true;
+          ProtectKernelLogs = true;
+          ProtectControlGroups = true;
+          ProtectHostname = true;
+          ProtectProc = "invisible";
+          ProcSubset = "pid";
         };
       };
       systemd.timers.keep-node-vault-mesh-push = lib.mkIf (cfg.role == "active") {
