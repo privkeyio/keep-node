@@ -96,6 +96,12 @@
               timeout=90,
           )
 
+      # The confinement is the whole point of this unit; assert the load-bearing directives are actually
+      # in effect (and the daemon still peered above WHILE confined) so a refactor can't silently drop
+      # them -- the daemon would keep forming the mesh either way, so the peering check alone won't catch it.
+      for prop in ["ProtectSystem=strict", "DevicePolicy=closed", "MemoryDenyWriteExecute=yes"]:
+          nodeA.succeed(f"systemctl show keep-node-mesh.service | grep -qx '{prop}'")
+
       # 6. Reach the peer over the TUNNEL (its deterministic 10.44.x.y mesh IP), not the underlay.
       meshB = nodeA.succeed(f"{H} nvpn ip --peer --discover-secs 0").strip().splitlines()[0].strip()
       meshA = nodeB.succeed(f"{H} nvpn ip --peer --discover-secs 0").strip().splitlines()[0].strip()
