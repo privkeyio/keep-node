@@ -12,6 +12,13 @@
 }:
 let
   cfg = config.keepNode.mesh;
+  # When the FROST gate encrypts the vault volume, the mesh identity (a Nostr private key) must not be
+  # persisted in the clear: it has to live on the mounted encrypted volume, and never be written to the
+  # bare root fs if the gate failed to unlock. Same fail-closed rule the rsa-key installer follows.
+  gateEnabled = config.keepNode.frostGate.enable or false;
+  # The gate mounts the decrypted LUKS mapper here; the prepare guard requires the identity dir to be
+  # backed by exactly this device, matching the frost-gate mount guard.
+  mapperDevice = "/dev/mapper/${config.keepNode.frostGate.mapperName or "keep-vault"}";
 in
 {
   options.keepNode.mesh = {
@@ -34,8 +41,10 @@ in
       default = "/var/lib/keep-node-mesh";
       description = ''
         HOME for the nvpn daemon: its Nostr mesh identity (`.config/nvpn/config.toml`, a secret key)
-        lives here. On a FROST-gated node this should sit on the encrypted volume, like `rsa_key.pem`,
-        so the mesh identity is not persisted in the clear; defaults to a plain state dir for bring-up.
+        lives here. On a FROST-gated node this MUST sit on the encrypted volume (e.g. a subdirectory of
+        `keepNode.frostGate.dataDir`), so the mesh private key is not persisted in the clear; a
+        fail-closed guard refuses to start the mesh unless it resolves onto the encrypted mapper while
+        the gate is enabled. Defaults to a plain state dir, correct for an ungated bring-up node.
       '';
     };
   };
@@ -58,11 +67,55 @@ in
     # The mesh underlay (WireGuard) speaks UDP on the listen port; peers must reach it.
     networking.firewall.allowedUDPPorts = [ cfg.listenPort ];
 
-    # Persist the mesh identity dir before the daemon (or provisioning) writes into it.
-    systemd.tmpfiles.rules = [ "d ${cfg.stateDir} 0700 root root -" ];
+    # Ungated: pre-create the identity dir on the (plain) root fs. Gated: DO NOT create it here, since
+    # tmpfiles runs at early boot before the FROST volume is mounted and would land it on the
+    # unencrypted disk; keep-node-mesh-prepare creates it on the mounted encrypted volume instead.
+    systemd.tmpfiles.rules = lib.optionals (!gateEnabled) [ "d ${cfg.stateDir} 0700 root root -" ];
+
+    # Gated only: fail-closed preparation. Runs after the FROST gate, refuses to proceed unless the
+    # identity dir resolves onto a real mount (not the '/' root fs), then creates it 0700 on the
+    # encrypted volume. This is what keeps the mesh private key off unencrypted disk when the gate is
+    # on (and off it entirely if the gate failed to unlock). Mirrors the rsa-key installer's guard.
+    systemd.services.keep-node-mesh-prepare = lib.mkIf gateEnabled {
+      description = "Prepare the nvpn mesh identity dir on the encrypted volume (fail-closed)";
+      after = [ "keep-node-frost-gate.service" ];
+      requires = [ "keep-node-frost-gate.service" ];
+      before = [ "keep-node-mesh.service" ];
+      requiredBy = [ "keep-node-mesh.service" ];
+      path = [
+        pkgs.util-linux
+        pkgs.coreutils
+      ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+      };
+      script = ''
+        set -euo pipefail
+        d=${lib.escapeShellArg cfg.stateDir}
+        # `findmnt -T` needs an existing path, and the identity dir does not exist yet on first run, so
+        # walk up to the nearest existing ancestor and resolve the SOURCE device backing THAT. Require
+        # it to be the encrypted mapper: a gate that failed to unlock leaves the ancestor on the root fs,
+        # and a bind mount / tmpfs / second unencrypted partition would otherwise pass a mere "not /"
+        # check -> demand the exact mapper device instead, so anything but the mounted encrypted volume
+        # fails closed rather than persist the mesh key in cleartext. Matches the frost-gate mount guard.
+        p="$d"
+        while [ ! -e "$p" ] && [ "$p" != "/" ]; do p="$(dirname "$p")"; done
+        src="$(findmnt -nro SOURCE -T "$p" 2>/dev/null || echo none)"
+        if [ "$src" != ${lib.escapeShellArg mapperDevice} ]; then
+          echo "keep-node-mesh-prepare: identity dir $d is not on the encrypted volume (backing device '$src', expected ${mapperDevice}); refusing to persist the mesh private key in cleartext. Set keepNode.mesh.stateDir onto the encrypted volume (a subdirectory of keepNode.frostGate.dataDir)." >&2
+          exit 1
+        fi
+        install -d -m 0700 "$d"
+      '';
+    };
 
     systemd.services.keep-node-mesh = {
       description = "nvpn encrypted mesh transport (nostr-vpn private mesh)";
+      # On a gated node, only start once the identity dir is prepared on the encrypted volume (which
+      # itself requires the gate to have unlocked+mounted); no-op ordering on an ungated node.
+      after = lib.optional gateEnabled "keep-node-mesh-prepare.service";
+      requires = lib.optional gateEnabled "keep-node-mesh-prepare.service";
       # The daemon shells out to `ip` (iproute2) to configure its userspace-WireGuard tun interface
       # and routes; without it on PATH, tunnel setup fails with ENOENT.
       path = [ pkgs.iproute2 ];
