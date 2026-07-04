@@ -297,7 +297,10 @@
         );
         ha-failover = pkgs.testers.runNixOSTest {
           imports = [ ./tests/ha-failover.nix ];
-          _module.args.vaultRsaKeyFixture = vaultRsaKeyFixture;
+          _module.args = {
+            inherit vaultRsaKeyFixture;
+            nvpnPackage = nvpn;
+          };
         };
         mesh = pkgs.testers.runNixOSTest {
           imports = [ ./tests/mesh.nix ];

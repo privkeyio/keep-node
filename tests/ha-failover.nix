@@ -17,7 +17,11 @@
 # gate cannot unlock. nodeA/nodeB run with the gate off and never reach that branch.
 #
 # Run: nix build .#checks.x86_64-linux.ha-failover
-{ vaultRsaKeyFixture, ... }:
+{
+  vaultRsaKeyFixture,
+  nvpnPackage,
+  ...
+}:
 {
   name = "keep-node-ha-failover";
 
@@ -54,6 +58,14 @@
       keepNode.frostGate = {
         enable = true;
         volumeDevice = "/dev/vdb";
+      };
+      # Mesh identity-at-rest: with the gate on, keep-node-mesh-prepare must place the nvpn identity
+      # dir on the ENCRYPTED volume and fail closed if the volume is not mounted. stateDir is a subdir
+      # of the gated dataDir, so it only exists once the LUKS mapper is mounted there.
+      keepNode.mesh = {
+        enable = true;
+        package = nvpnPackage;
+        stateDir = "/var/lib/vaultwarden/mesh";
       };
       environment.systemPackages = [ pkgs.cryptsetup ];
       virtualisation = {
@@ -157,6 +169,12 @@
         "gate-enabled node did not seed the shared key onto the encrypted volume"
     )
 
+    # Mesh identity-at-rest (keep-node-vvz), healthy path: with the volume mounted, mesh-prepare's
+    # guard passes and it creates the nvpn identity dir ON the encrypted mapper, not the root fs.
+    gated.systemctl("start keep-node-mesh-prepare.service")
+    gated.succeed("test -d /var/lib/vaultwarden/mesh")
+    gated.succeed("findmnt -n -o SOURCE -T /var/lib/vaultwarden/mesh | grep -q '/dev/mapper/keep-vault'")
+
     # Force the next unlock to fail closed: on the provisioned volume (completion marker present)
     # remove the TPM2 keyslot, leaving no usable key. The gate then refuses to reformat and stays
     # down -- exactly the scenario the requires-on-gate + mountpoint guard defend against.
@@ -191,5 +209,18 @@
     assert status != 0, f"installer did not fail closed while the volume was unmounted (rc={status}): {out}"
     assert "refusing to write key to unencrypted disk" in out, f"mountpoint guard did not fire: {out}"
     gated.fail("test -e /var/lib/vaultwarden/rsa_key.pem")
+
+    # Same backstop for the mesh identity (keep-node-vvz): with the volume unmounted, mesh-prepare's
+    # findmnt guard must refuse (non-zero, guard message) and leave no nvpn identity dir on the
+    # unencrypted root fs. The healthy-path dir sits on the now-unmounted encrypted volume, so it must
+    # not be visible here either.
+    mesh_script = gated.succeed(
+        "systemctl show -p ExecStart --value keep-node-mesh-prepare.service "
+        "| grep -oE '/nix/store/[^ ;]*unit-script-keep-node-mesh-prepare-start[^ ;]*' | head -n1"
+    ).strip()
+    status, out = gated.execute(f"{mesh_script} 2>&1")
+    assert status != 0, f"mesh-prepare did not fail closed while the volume was unmounted (rc={status}): {out}"
+    assert "refusing to persist the mesh private key in cleartext" in out, f"mesh guard did not fire: {out}"
+    gated.fail("test -e /var/lib/vaultwarden/mesh")
   '';
 }
