@@ -14,6 +14,7 @@
     ./ingress.nix
     ./vault-replication.nix
     ./mesh.nix
+    ./admin-access.nix
   ];
 
   # Appliance defaults (overridable). Hostname is left to the host/VM/test layer so it does
