@@ -148,6 +148,25 @@
         openssl rsa -in "$out/rsa_key.pem" -pubout -out "$out/rsa_key.pub.pem" 2>/dev/null
       '';
 
+      # Two pre-generated nvpn mesh identities for the declarative-onboarding test. Each `$out/<id>` is
+      # the pair nvpn init writes (config.toml + its 0600 nostr secret), and `$out/npub-<id>` is the
+      # identity's npub, read via IFD so the test can bake the PEER's npub into the declarative roster at
+      # eval time (the frostGroupFixture pattern; onboarding needs the npub known before boot). Test-only
+      # (the secret sits world-readable in /nix/store); a real deploy injects an out-of-band identity
+      # path, exactly as `keepNode.mesh.identityDir` warns. Non-reproducible (random keygen), cached.
+      nvpnIdentityFixture = pkgs.runCommand "nvpn-identity-fixture" { nativeBuildInputs = [ nvpn ]; } ''
+        mkdir -p "$out"
+        for id in a b; do
+          export XDG_CONFIG_HOME="$TMPDIR/$id-cfg"
+          npub="$(nvpn init 2>&1 | grep -aoE 'npub1[a-z0-9]+' | head -1)"
+          [ -n "$npub" ] || { echo "nvpn-identity-fixture: no npub generated for $id" >&2; exit 1; }
+          printf '%s' "$npub" > "$out/npub-$id"
+          mkdir -p "$out/$id"
+          cp "$XDG_CONFIG_HOME/nvpn/config.toml" "$out/$id/config.toml"
+          cp "$XDG_CONFIG_HOME/nvpn/.config.toml.nostr-secret-key.secret" "$out/$id/secret"
+        done
+      '';
+
       # Pure-eval guard for the frostGate sealPcrs hardening: the module must reject a sealPcrs
       # that binds the TPM seal to nothing. An empty list makes --tpm2-pcrs= bind no PCRs
       # (fail-open: the key releases regardless of boot state); an out-of-range index is a typo
@@ -305,6 +324,13 @@
         mesh = pkgs.testers.runNixOSTest {
           imports = [ ./tests/mesh.nix ];
           _module.args.nvpnPackage = nvpn;
+        };
+        mesh-onboarding = pkgs.testers.runNixOSTest {
+          imports = [ ./tests/mesh-onboarding.nix ];
+          _module.args = {
+            nvpnPackage = nvpn;
+            inherit nvpnIdentityFixture;
+          };
         };
         mesh-replication = pkgs.testers.runNixOSTest {
           imports = [ ./tests/mesh-replication.nix ];

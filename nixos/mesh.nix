@@ -19,6 +19,17 @@ let
   # The gate mounts the decrypted LUKS mapper here; the prepare guard requires the identity dir to be
   # backed by exactly this device, matching the frost-gate mount guard.
   mapperDevice = "/dev/mapper/${config.keepNode.frostGate.mapperName or "keep-vault"}";
+  # Declarative onboarding is on once a static roster is configured. It provisions + boot-enables the
+  # mesh from config; empty `peers` leaves the old manual (test/onboard-by-hand) behaviour untouched.
+  declarative = cfg.peers != [ ];
+  # `nvpn set` roster args: each peer is both a participant and a static endpoint hint. This node's own
+  # npub is added at runtime (read from the placed identity), since it isn't known at eval time.
+  participantArgs = lib.concatMapStringsSep " " (
+    p: "--participant ${lib.escapeShellArg p.npub}"
+  ) cfg.peers;
+  peerEndpointArgs = lib.concatMapStringsSep " " (
+    p: "--fips-peer-endpoint ${lib.escapeShellArg "${p.npub}=${p.endpoint}"}"
+  ) cfg.peers;
 in
 {
   options.keepNode.mesh = {
@@ -47,6 +58,64 @@ in
         the gate is enabled. Defaults to a plain state dir, correct for an ungated bring-up node.
       '';
     };
+
+    # --- Declarative onboarding (co-owned cluster, static endpoints) ---
+    # When `peers` is set, the mesh is provisioned + started from config at boot with no imperative
+    # `nvpn init/set`: the node joins a mutual static roster the operator authored (both npubs known at
+    # deploy time). This is the path upstream nvpn proves (static endpoints, no relay discovery).
+    networkId = lib.mkOption {
+      type = lib.types.str;
+      default = "keepnode";
+      description = "The shared mesh network id all nodes in the cluster set (`nvpn set --network-id`).";
+    };
+
+    selfEndpoint = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "192.0.2.10:51820";
+      description = ''
+        This node's own advertised underlay endpoint (`ip:port`) that peers dial. Required for
+        declarative onboarding (`peers` set). Static-endpoint mesh, so peers reach it here directly.
+      '';
+    };
+
+    peers = lib.mkOption {
+      default = [ ];
+      description = ''
+        The static roster of OTHER nodes in the cluster. Non-empty turns on declarative onboarding:
+        the mesh identity, roster, and peer endpoints are applied from this config at boot and the
+        daemon comes up with no manual `nvpn set`. Each peer's npub must be known at deploy time (the
+        operator owns the cluster). Empty leaves the mesh in manual/onboarding-by-hand mode.
+      '';
+      type = lib.types.listOf (
+        lib.types.submodule {
+          options = {
+            npub = lib.mkOption {
+              type = lib.types.str;
+              description = "The peer's nvpn Nostr identity (npub).";
+            };
+            endpoint = lib.mkOption {
+              type = lib.types.str;
+              example = "192.0.2.11:51820";
+              description = "The peer's advertised underlay endpoint (`ip:port`).";
+            };
+          };
+        }
+      );
+    };
+
+    identityDir = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = ''
+        Absolute path string to a pre-generated nvpn identity to install (a directory holding
+        `config.toml` and `secret`, as produced by `nvpn init`), instead of self-generating one at
+        first boot. Lets the deployer fix each node's npub ahead of time so the roster can be authored
+        declaratively. Must be a path string on the target host (delivered out-of-band, e.g. via
+        agenix/sops onto the encrypted volume), NOT a Nix-path literal, so the secret key is never
+        copied into the world-readable Nix store.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -54,6 +123,10 @@ in
       {
         assertion = cfg.package != null;
         message = "keepNode.mesh.enable is true but keepNode.mesh.package is null: no nvpn binary to run.";
+      }
+      {
+        assertion = !declarative || cfg.selfEndpoint != null;
+        message = "keepNode.mesh.peers is set (declarative onboarding) but keepNode.mesh.selfEndpoint is null: the node must advertise its own ip:port endpoint for peers to reach it.";
       }
     ];
 
@@ -72,14 +145,14 @@ in
     # unencrypted disk; keep-node-mesh-prepare creates it on the mounted encrypted volume instead.
     systemd.tmpfiles.rules = lib.optionals (!gateEnabled) [ "d ${cfg.stateDir} 0700 root root -" ];
 
-    # Gated only: fail-closed preparation. Runs after the FROST gate, refuses to proceed unless the
-    # identity dir resolves onto a real mount (not the '/' root fs), then creates it 0700 on the
-    # encrypted volume. This is what keeps the mesh private key off unencrypted disk when the gate is
-    # on (and off it entirely if the gate failed to unlock). Mirrors the rsa-key installer's guard.
-    systemd.services.keep-node-mesh-prepare = lib.mkIf gateEnabled {
-      description = "Prepare the nvpn mesh identity dir on the encrypted volume (fail-closed)";
-      after = [ "keep-node-frost-gate.service" ];
-      requires = [ "keep-node-frost-gate.service" ];
+    # Provision the mesh identity (+ the declarative roster). Runs on a gated node (to place the key on
+    # the encrypted volume, fail-closed) and/or when `peers` is set (declarative onboarding), before the
+    # daemon. On a gated node the mapper guard keeps the private key off unencrypted disk if the gate
+    # failed to unlock; mirrors the rsa-key installer's guard.
+    systemd.services.keep-node-mesh-prepare = lib.mkIf (gateEnabled || declarative) {
+      description = "Provision the nvpn mesh identity + roster (fail-closed on a gated node)";
+      after = lib.optional gateEnabled "keep-node-frost-gate.service";
+      requires = lib.optional gateEnabled "keep-node-frost-gate.service";
       before = [ "keep-node-mesh.service" ];
       requiredBy = [ "keep-node-mesh.service" ];
       path = [
@@ -96,49 +169,76 @@ in
       script = ''
         set -euo pipefail
         d=${lib.escapeShellArg cfg.stateDir}
-        # `findmnt -T` needs an existing path, and the identity dir does not exist yet on first run, so
-        # walk up to the nearest existing ancestor and resolve the SOURCE device backing THAT. Require
-        # it to be the encrypted mapper: a gate that failed to unlock leaves the ancestor on the root fs,
-        # and a bind mount / tmpfs / second unencrypted partition would otherwise pass a mere "not /"
-        # check -> demand the exact mapper device instead, so anything but the mounted encrypted volume
-        # fails closed rather than persist the mesh key in cleartext. Matches the frost-gate mount guard.
-        p="$d"
-        while [ ! -e "$p" ] && [ "$p" != "/" ]; do p="$(dirname "$p")"; done
-        src="$(findmnt -nro SOURCE -T "$p" 2>/dev/null || echo none)"
-        if [ "$src" != ${lib.escapeShellArg mapperDevice} ]; then
-          echo "keep-node-mesh-prepare: identity dir $d is not on the encrypted volume (backing device '$src', expected ${mapperDevice}); refusing to persist the mesh private key in cleartext. Set keepNode.mesh.stateDir onto the encrypted volume (a subdirectory of keepNode.frostGate.dataDir)." >&2
-          exit 1
-        fi
+        ${lib.optionalString gateEnabled ''
+          # `findmnt -T` needs an existing path, and the identity dir does not exist yet on first run, so
+          # walk up to the nearest existing ancestor and resolve the SOURCE device backing THAT. Require
+          # it to be the encrypted mapper: a gate that failed to unlock leaves the ancestor on the root
+          # fs, and a bind mount / tmpfs / second unencrypted partition would otherwise pass a mere
+          # "not /" check -> demand the exact mapper device, so anything but the mounted encrypted volume
+          # fails closed rather than persist the mesh key in cleartext. Matches the frost-gate guard.
+          p="$d"
+          while [ ! -e "$p" ] && [ "$p" != "/" ]; do p="$(dirname "$p")"; done
+          src="$(findmnt -nro SOURCE -T "$p" 2>/dev/null || echo none)"
+          if [ "$src" != ${lib.escapeShellArg mapperDevice} ]; then
+            echo "keep-node-mesh-prepare: identity dir $d is not on the encrypted volume (backing device '$src', expected ${mapperDevice}); refusing to persist the mesh private key in cleartext. Set keepNode.mesh.stateDir onto the encrypted volume (a subdirectory of keepNode.frostGate.dataDir)." >&2
+            exit 1
+          fi
+        ''}
         install -d -m 0700 "$d"
-        # Generate the identity HERE, past the guard, on the encrypted volume -- so the private key is
-        # created ON the mounted mapper and never by a raw `nvpn init` an operator might run against an
-        # unencrypted path (the daemon-start guard alone can't stop that write). Idempotent: only init
-        # when no identity exists, so a redeploy/restart never clobbers the persisted key.
-        # Deny group/other on everything `nvpn init` creates under here. It writes config.toml (holding
-        # the Nostr private key) with an explicit 0600, but the `.config`/`.config/nvpn` dirs it makes
-        # inherit the umask -- so tighten it to 077 rather than lean on the parent's 0700 alone.
+        # Deny group/other on everything created here (the config holds the Nostr private key; the
+        # .config dirs would otherwise inherit a looser umask).
         umask 077
-        if [ ! -e "$d/.config/nvpn/config.toml" ]; then
-          HOME="$d" ${lib.getExe cfg.package} init
+        cfgdir="$d/.config/nvpn"
+        # Identity: install a pre-generated one (fixed npub, for a declarative roster) or self-generate,
+        # HERE past the guard, on the encrypted volume -- never by a raw operator `nvpn init` against an
+        # unencrypted path. Idempotent: only when absent, so a redeploy never clobbers the persisted key.
+        if [ ! -e "$cfgdir/config.toml" ]; then
+          ${
+            if cfg.identityDir != null then
+              ''
+                install -d -m 0700 "$cfgdir"
+                install -m 0600 ${lib.escapeShellArg cfg.identityDir}/config.toml "$cfgdir/config.toml"
+                install -m 0600 ${lib.escapeShellArg cfg.identityDir}/secret "$cfgdir/.config.toml.nostr-secret-key.secret"
+              ''
+            else
+              ''HOME="$d" ${lib.getExe cfg.package} init''
+          }
         fi
+        ${lib.optionalString declarative ''
+          # Declarative roster + STATIC peer endpoints (no relay discovery -- the path upstream proves).
+          # This node is a participant too; read its own npub from the placed identity.
+          selfnpub="$(${pkgs.gawk}/bin/awk '/^\[nostr\]/{n=1;next} /^\[/{n=0} n&&/^public_key/{print $3}' "$cfgdir/config.toml" | tr -d '"')"
+          [ -n "$selfnpub" ] || { echo "keep-node-mesh-prepare: could not read this node's npub from $cfgdir/config.toml" >&2; exit 1; }
+          # Two calls, mirroring the proven tests/mesh.nix sequence: set the roster on the ACTIVE
+          # network first, THEN the network-id + endpoints. Combining `--network-id` with `--participant`
+          # makes nvpn try to SELECT a network by that id (which does not exist yet) -> "network not
+          # found"; on its own, `--network-id` renames the active network.
+          HOME="$d" ${lib.getExe cfg.package} set --participant "$selfnpub" ${participantArgs}
+          HOME="$d" ${lib.getExe cfg.package} set --network-id ${lib.escapeShellArg cfg.networkId} \
+            --listen-port ${toString cfg.listenPort} --fips-advertise-endpoint true \
+            --endpoint ${lib.escapeShellArg cfg.selfEndpoint} \
+            ${peerEndpointArgs} \
+            --fips-nostr-discovery-enabled false
+        ''}
       '';
     };
 
     systemd.services.keep-node-mesh = {
       description = "nvpn encrypted mesh transport (nostr-vpn private mesh)";
-      # On a gated node, only start once the identity dir is prepared on the encrypted volume (which
-      # itself requires the gate to have unlocked+mounted); no-op ordering on an ungated node.
-      after = lib.optional gateEnabled "keep-node-mesh-prepare.service";
-      requires = lib.optional gateEnabled "keep-node-mesh-prepare.service";
+      # Order after the provision unit whenever it exists (gated node, or declarative onboarding): it
+      # places the identity on the encrypted volume and applies the roster before the daemon connects.
+      after = lib.optional (gateEnabled || declarative) "keep-node-mesh-prepare.service";
+      requires = lib.optional (gateEnabled || declarative) "keep-node-mesh-prepare.service";
+      # Declarative onboarding: bring the mesh up at boot from config (identity + roster provisioned by
+      # keep-node-mesh-prepare). Without a static roster, stay manual (started by onboarding/the test)
+      # so an unconfigured node never auto-connects to nothing.
+      wantedBy = lib.optional declarative "multi-user.target";
       # The daemon shells out to `ip` (iproute2) to configure its userspace-WireGuard tun interface
       # and routes; without it on PATH, tunnel setup fails with ENOENT.
       path = [ pkgs.iproute2 ];
-      # Deliberately NOT wantedBy multi-user.target in this increment: the mesh identity (`nvpn init`)
-      # and the peer roster/endpoints (`nvpn set`) are provisioned first (by onboarding, or by the
-      # test), then this is started. A later increment provisions them declaratively and enables it at
-      # boot. The daemon still runs as root (opening /dev/net/tun needs it here), but its filesystem
-      # blast radius is locked down below; dropping to a dedicated non-root User= is the remaining
-      # hardening step (blocked on making /dev/net/tun reachable without uid 0).
+      # The daemon still runs as root (opening /dev/net/tun needs it here), but its filesystem blast
+      # radius is locked down below; dropping to a dedicated non-root User= is the remaining hardening
+      # step (blocked on making /dev/net/tun reachable without uid 0).
       serviceConfig = {
         ExecStart = "${lib.getExe cfg.package} connect";
         # nvpn reads $HOME/.config/nvpn/config.toml.
