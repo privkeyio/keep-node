@@ -89,6 +89,9 @@ in
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
+        UMask = "0077";
+        PrivateTmp = true;
+        TimeoutStartSec = "90s";
       };
       script = ''
         set -euo pipefail
@@ -107,6 +110,17 @@ in
           exit 1
         fi
         install -d -m 0700 "$d"
+        # Generate the identity HERE, past the guard, on the encrypted volume -- so the private key is
+        # created ON the mounted mapper and never by a raw `nvpn init` an operator might run against an
+        # unencrypted path (the daemon-start guard alone can't stop that write). Idempotent: only init
+        # when no identity exists, so a redeploy/restart never clobbers the persisted key.
+        # Deny group/other on everything `nvpn init` creates under here. It writes config.toml (holding
+        # the Nostr private key) with an explicit 0600, but the `.config`/`.config/nvpn` dirs it makes
+        # inherit the umask -- so tighten it to 077 rather than lean on the parent's 0700 alone.
+        umask 077
+        if [ ! -e "$d/.config/nvpn/config.toml" ]; then
+          HOME="$d" ${lib.getExe cfg.package} init
+        fi
       '';
     };
 
