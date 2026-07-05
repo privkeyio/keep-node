@@ -742,7 +742,12 @@ in
             "/dev/disk/by-partuuid/"
           ])
         )
-        "keepNode.frostGate.volumeDevice (${cfg.volumeDevice}) is not a stable /dev/disk/by-id or /dev/disk/by-uuid path. On real hardware a kernel-enumeration name (or topology-based /dev/disk/by-path) can re-point at a different disk, and first-boot provisioning could format the wrong device. See the volumeDevice option docs.";
+        "keepNode.frostGate.volumeDevice (${cfg.volumeDevice}) is not a stable /dev/disk/by-id or /dev/disk/by-uuid path. On real hardware a kernel-enumeration name (or topology-based /dev/disk/by-path) can re-point at a different disk, and first-boot provisioning could format the wrong device. See the volumeDevice option docs."
+      # Production tripwire: allowInsecureWs disables the ws->wss upgrade guard on the boot OPRF
+      # exchange, so the unlock share/response travels in plaintext and is MITM-able by a hostile relay
+      # or anyone on the network path. It is test-only; surface it loudly so it can never ship enabled
+      # by accident.
+      ++ lib.optional cfg.allowInsecureWs "keepNode.frostGate.allowInsecureWs is ENABLED: the boot threshold-OPRF unlock exchange runs over plaintext ws:// (KEEP_ALLOW_WS), so a hostile relay or on-path attacker can observe or tamper with the unlock. This is TEST-ONLY and must never be set on a real deployment.";
 
     assertions = [
       {
