@@ -107,6 +107,13 @@ in
           exit 1
         fi
         install -d -m 0700 "$d"
+        # Generate the identity HERE, past the guard, on the encrypted volume -- so the private key is
+        # created ON the mounted mapper and never by a raw `nvpn init` an operator might run against an
+        # unencrypted path (the daemon-start guard alone can't stop that write). Idempotent: only init
+        # when no identity exists, so a redeploy/restart never clobbers the persisted key.
+        if [ ! -e "$d/.config/nvpn/config.toml" ]; then
+          HOME="$d" ${lib.getExe cfg.package} init
+        fi
       '';
     };
 

@@ -174,6 +174,14 @@
     gated.systemctl("start keep-node-mesh-prepare.service")
     gated.succeed("test -d /var/lib/vaultwarden/mesh")
     gated.succeed("findmnt -n -o SOURCE -T /var/lib/vaultwarden/mesh | grep -q '/dev/mapper/keep-vault'")
+    # keep-node-1jv: mesh-prepare GENERATES the identity here (nvpn init), so the private key itself
+    # lands on the encrypted mapper, not just its dir. Assert the config with a real Nostr key exists,
+    # and that it is backed by the mapper.
+    gated.succeed("grep -q '^public_key' /var/lib/vaultwarden/mesh/.config/nvpn/config.toml")
+    gated.succeed(
+        "findmnt -n -o SOURCE -T /var/lib/vaultwarden/mesh/.config/nvpn/config.toml "
+        "| grep -q '/dev/mapper/keep-vault'"
+    )
 
     # Force the next unlock to fail closed: on the provisioned volume (completion marker present)
     # remove the TPM2 keyslot, leaving no usable key. The gate then refuses to reformat and stays
