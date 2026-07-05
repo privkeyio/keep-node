@@ -128,6 +128,21 @@ in
         assertion = !declarative || cfg.selfEndpoint != null;
         message = "keepNode.mesh.peers is set (declarative onboarding) but keepNode.mesh.selfEndpoint is null: the node must advertise its own ip:port endpoint for peers to reach it.";
       }
+      {
+        # Declarative onboarding pins peers to the npubs baked into each node's static roster (relay
+        # discovery is off). Self-generating an identity here yields a RANDOM npub no peer lists, so the
+        # mesh silently never forms -- the self npub must be fixed at deploy time via a pre-placed identity.
+        assertion = !declarative || cfg.identityDir != null;
+        message = "keepNode.mesh.peers is set (declarative onboarding) but keepNode.mesh.identityDir is null: the node would self-generate a random npub that no peer's roster lists, so the mesh would never form. Provide a pre-generated identity so this node's npub is fixed at deploy time.";
+      }
+      {
+        # The whole reason identityDir is a path STRING (not a Nix path) is to keep the mesh secret key
+        # off the world-readable /nix/store. A path literal (`./secrets/a`) coerces into the store, 0444
+        # and pushed to any binary cache -- exactly the cleartext-key leak the FROST gate exists to stop.
+        # Reject it at eval time instead of leaving it to the option's prose.
+        assertion = cfg.identityDir == null || !lib.hasPrefix builtins.storeDir cfg.identityDir;
+        message = "keepNode.mesh.identityDir (${toString cfg.identityDir}) is inside the Nix store: that copies the mesh Nostr secret key into the world-readable /nix/store. Deliver it out-of-band to a path on the target host (e.g. /run/secrets/... via agenix/sops), never as a Nix path literal.";
+      }
     ];
 
     # boringtun is a userspace WireGuard: the daemon opens /dev/net/tun (generic tun module) and needs
@@ -197,8 +212,13 @@ in
             if cfg.identityDir != null then
               ''
                 install -d -m 0700 "$cfgdir"
-                install -m 0600 ${lib.escapeShellArg cfg.identityDir}/config.toml "$cfgdir/config.toml"
+                # Place the secret first and move config.toml (the idempotency sentinel above) into place
+                # LAST: an install interrupted between the two files must never leave a config.toml without
+                # its secret key, or the guard would skip re-install on every later boot and the daemon
+                # would never come up. config.toml existing therefore implies the secret is present too.
                 install -m 0600 ${lib.escapeShellArg cfg.identityDir}/secret "$cfgdir/.config.toml.nostr-secret-key.secret"
+                install -m 0600 ${lib.escapeShellArg cfg.identityDir}/config.toml "$cfgdir/config.toml.tmp"
+                mv -f "$cfgdir/config.toml.tmp" "$cfgdir/config.toml"
               ''
             else
               ''HOME="$d" ${lib.getExe cfg.package} init''
@@ -209,6 +229,9 @@ in
           # This node is a participant too; read its own npub from the placed identity.
           selfnpub="$(${pkgs.gawk}/bin/awk '/^\[nostr\]/{n=1;next} /^\[/{n=0} n&&/^public_key/{print $3}' "$cfgdir/config.toml" | tr -d '"')"
           [ -n "$selfnpub" ] || { echo "keep-node-mesh-prepare: could not read this node's npub from $cfgdir/config.toml" >&2; exit 1; }
+          # Publish the resolved npub (public value) so consumers read this one file instead of
+          # re-parsing config.toml's TOML with their own copy of the brittle awk above.
+          printf '%s' "$selfnpub" > "$d/selfnpub"
           # Two calls, mirroring the proven tests/mesh.nix sequence: set the roster on the ACTIVE
           # network first, THEN the network-id + endpoints. Combining `--network-id` with `--participant`
           # makes nvpn try to SELECT a network by that id (which does not exist yet) -> "network not

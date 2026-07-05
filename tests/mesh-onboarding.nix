@@ -5,8 +5,11 @@
 # init -> set --participant -> set --endpoint -> connect dance by hand from the testScript.
 #
 # Each node's identity is a pre-generated fixture (nvpnIdentityFixture), so the PEER's npub is known at
-# eval time and goes straight into `keepNode.mesh.peers` (the deploy-time roster). keep-node-mesh-prepare
-# installs the identity + applies the roster from config; keep-node-mesh.service is wantedBy boot.
+# eval time and goes straight into `keepNode.mesh.peers` (the deploy-time roster). The fixture lives in
+# the Nix store, but `identityDir` refuses a store path (the secret key must not land in the
+# world-readable store), so a tmpfiles rule copies the identity onto a runtime /run path FIRST -- the
+# out-of-band delivery a real deploy does via agenix/sops. keep-node-mesh-prepare then installs the
+# identity + applies the roster from config; keep-node-mesh.service is wantedBy boot.
 #
 # Run: nix build .#checks.x86_64-linux.mesh-onboarding
 {
@@ -17,45 +20,47 @@
 let
   npubA = builtins.readFile "${nvpnIdentityFixture}/npub-a";
   npubB = builtins.readFile "${nvpnIdentityFixture}/npub-b";
-  port = 51820;
+  # Where each node's identity is delivered on the target (off the store, as a real deploy would).
+  identityDir = "/run/keep-node-mesh-identity";
+  # One node's declarative config: its own fixture id copied to a runtime path, plus the peer's roster
+  # entry. Endpoints derive the port from the module's own listenPort so they stay aligned with it.
+  meshNode =
+    { self, peer, fixtureId, peerNpub }:
+    { nodes, ... }:
+    {
+      imports = [ ../nixos/mesh.nix ];
+      systemd.tmpfiles.rules = [
+        "C ${identityDir} 0700 root root - ${nvpnIdentityFixture}/${fixtureId}"
+      ];
+      keepNode.mesh = {
+        enable = true;
+        package = nvpnPackage;
+        inherit identityDir;
+        selfEndpoint = "${nodes.${self}.networking.primaryIPAddress}:${toString nodes.${self}.keepNode.mesh.listenPort}";
+        peers = [
+          {
+            npub = peerNpub;
+            endpoint = "${nodes.${peer}.networking.primaryIPAddress}:${toString nodes.${peer}.keepNode.mesh.listenPort}";
+          }
+        ];
+      };
+    };
 in
 {
   name = "keep-node-mesh-onboarding";
 
-  nodes.nodeA =
-    { nodes, ... }:
-    {
-      imports = [ ../nixos/mesh.nix ];
-      keepNode.mesh = {
-        enable = true;
-        package = nvpnPackage;
-        identityDir = "${nvpnIdentityFixture}/a";
-        selfEndpoint = "${nodes.nodeA.networking.primaryIPAddress}:${toString port}";
-        peers = [
-          {
-            npub = npubB;
-            endpoint = "${nodes.nodeB.networking.primaryIPAddress}:${toString port}";
-          }
-        ];
-      };
-    };
-  nodes.nodeB =
-    { nodes, ... }:
-    {
-      imports = [ ../nixos/mesh.nix ];
-      keepNode.mesh = {
-        enable = true;
-        package = nvpnPackage;
-        identityDir = "${nvpnIdentityFixture}/b";
-        selfEndpoint = "${nodes.nodeB.networking.primaryIPAddress}:${toString port}";
-        peers = [
-          {
-            npub = npubA;
-            endpoint = "${nodes.nodeA.networking.primaryIPAddress}:${toString port}";
-          }
-        ];
-      };
-    };
+  nodes.nodeA = meshNode {
+    self = "nodeA";
+    peer = "nodeB";
+    fixtureId = "a";
+    peerNpub = npubB;
+  };
+  nodes.nodeB = meshNode {
+    self = "nodeB";
+    peer = "nodeA";
+    fixtureId = "b";
+    peerNpub = npubA;
+  };
 
   testScript =
     { nodes, ... }:
@@ -78,11 +83,10 @@ in
       H = "HOME=${stateDir}"
 
       # The injected identities are the ones in effect (fixed npubs, so the declarative roster matched).
+      # keep-node-mesh-prepare publishes the resolved npub to this file, so read it rather than
+      # re-parsing config.toml's TOML here.
       def selfnpub(node):
-          return node.succeed(
-              "awk '/^\\[nostr\\]/{n=1;next} /^\\[/{n=0} n&&/^public_key/{print $3}' "
-              "${stateDir}/.config/nvpn/config.toml"
-          ).strip().strip('\"')
+          return node.succeed("cat ${stateDir}/selfnpub").strip()
 
       assert selfnpub(nodeA) == "${npubA}".strip(), "nodeA is not running the injected identity A"
       assert selfnpub(nodeB) == "${npubB}".strip(), "nodeB is not running the injected identity B"
