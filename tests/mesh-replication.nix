@@ -136,6 +136,20 @@
       # --- Push the replica to the standby OVER THE MESH (trigger the unit rather than wait the timer).
       # The standby's receiver is reachable only on the mesh interface. ---
       standby.wait_for_unit("keep-node-vault-receive.service")
+
+      # The confinement on the replication units that parse peer-pushed content (#53) is load-bearing
+      # security, not cosmetic: the receiver (rsync daemon fed by any mesh peer), the promote unit
+      # (litestream/sqlite3/rsync over peer content), and the push each carry a sandbox. Assert the
+      # directives are actually in effect -- the units keep functioning if a refactor drops them, so the
+      # replication steps below would NOT catch a silent regression; only this does.
+      def assert_hardened(node, unit):
+          for prop in ["ProtectSystem=strict", "MemoryDenyWriteExecute=yes"]:
+              node.succeed(f"systemctl show {unit} | grep -qx '{prop}'")
+
+      assert_hardened(standby, "keep-node-vault-receive.service")
+      assert_hardened(active, "keep-node-vault-mesh-push.service")
+      assert_hardened(standby, "keep-node-vault-promote.service")
+
       active.systemctl("start keep-node-vault-mesh-push.service")
 
       # --- The standby received the DB replica over the mesh; restoring it yields the probe row. A
