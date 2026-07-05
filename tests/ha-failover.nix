@@ -178,6 +178,12 @@
     # lands on the encrypted mapper, not just its dir. Assert the config with a real Nostr key exists,
     # and that it is backed by the mapper.
     gated.succeed("grep -q '^public_key' /var/lib/vaultwarden/mesh/.config/nvpn/config.toml")
+    # The private key itself is in this file (nostr secret_key), so it must not be world/group readable:
+    # the umask 077 in mesh-prepare locks it to 0600.
+    gated.succeed("grep -q '^secret_key' /var/lib/vaultwarden/mesh/.config/nvpn/config.toml")
+    gated.succeed(
+        "stat -c %a /var/lib/vaultwarden/mesh/.config/nvpn/config.toml | grep -qx 600"
+    )
     gated.succeed(
         "findmnt -n -o SOURCE -T /var/lib/vaultwarden/mesh/.config/nvpn/config.toml "
         "| grep -q '/dev/mapper/keep-vault'"
