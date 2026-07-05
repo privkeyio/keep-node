@@ -25,7 +25,12 @@ let
   # One node's declarative config: its own fixture id copied to a runtime path, plus the peer's roster
   # entry. Endpoints derive the port from the module's own listenPort so they stay aligned with it.
   meshNode =
-    { self, peer, fixtureId, peerNpub }:
+    {
+      self,
+      peer,
+      fixtureId,
+      peerNpub,
+    }:
     { nodes, ... }:
     {
       imports = [ ../nixos/mesh.nix ];
@@ -36,11 +41,15 @@ let
         enable = true;
         package = nvpnPackage;
         inherit identityDir;
-        selfEndpoint = "${nodes.${self}.networking.primaryIPAddress}:${toString nodes.${self}.keepNode.mesh.listenPort}";
+        selfEndpoint = "${nodes.${self}.networking.primaryIPAddress}:${
+          toString nodes.${self}.keepNode.mesh.listenPort
+        }";
         peers = [
           {
             npub = peerNpub;
-            endpoint = "${nodes.${peer}.networking.primaryIPAddress}:${toString nodes.${peer}.keepNode.mesh.listenPort}";
+            endpoint = "${nodes.${peer}.networking.primaryIPAddress}:${
+              toString nodes.${peer}.keepNode.mesh.listenPort
+            }";
           }
         ];
       };
