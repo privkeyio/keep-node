@@ -154,6 +154,14 @@
       # eval time (the frostGroupFixture pattern; onboarding needs the npub known before boot). Test-only
       # (the secret sits world-readable in /nix/store); a real deploy injects an out-of-band identity
       # path, exactly as `keepNode.mesh.identityDir` warns. Non-reproducible (random keygen), cached.
+      # An ed25519 "operator" SSH keypair for the admin-access test: the pubkey goes into
+      # keepNode.adminAuthorizedKeys, the private key drives the ssh client. Test-only (the private key
+      # sits in the world-readable store); a real deploy uses the operator's own out-of-band key.
+      adminKeyFixture = pkgs.runCommand "admin-ssh-key" { nativeBuildInputs = [ pkgs.openssh ]; } ''
+        mkdir -p "$out"
+        ssh-keygen -t ed25519 -N "" -C keepadmin-test -f "$out/id"
+      '';
+
       nvpnIdentityFixture = pkgs.runCommand "nvpn-identity-fixture" { nativeBuildInputs = [ nvpn ]; } ''
         mkdir -p "$out"
         for id in a b; do
@@ -330,6 +338,13 @@
           _module.args = {
             nvpnPackage = nvpn;
             inherit nvpnIdentityFixture;
+          };
+        };
+        mesh-admin-ssh = pkgs.testers.runNixOSTest {
+          imports = [ ./tests/mesh-admin-ssh.nix ];
+          _module.args = {
+            nvpnPackage = nvpn;
+            inherit nvpnIdentityFixture adminKeyFixture;
           };
         };
         mesh-replication = pkgs.testers.runNixOSTest {
