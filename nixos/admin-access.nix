@@ -39,10 +39,24 @@ in
   config = lib.mkIf cfg.enable {
     assertions = [
       {
-        # Anti-lockout: password auth is off below, so zero keys = no way in over the network, ever.
-        # Fail the build rather than brick a remote box (the one lockout foot-gun the research flags).
-        assertion = cfg.authorizedKeys != [ ];
-        message = "keepNode.adminAccess.enable is true but keepNode.adminAccess.authorizedKeys is empty: SSH password auth is disabled, so this would permanently lock out remote access. Add at least one operator public key (or leave adminAccess off).";
+        # Anti-lockout: password auth is off below, so zero (or only blank) keys = no way in over the
+        # network, ever. Fail the build rather than brick a remote box (the one lockout foot-gun the
+        # research flags). Empty/whitespace-only entries don't count as a usable key.
+        assertion = lib.any (k: k != "") (map lib.strings.trim cfg.authorizedKeys);
+        message = "keepNode.adminAccess.enable is true but keepNode.adminAccess.authorizedKeys has no usable key (empty, or only blank/whitespace entries): SSH password auth is disabled, so this would permanently lock out remote access. Add at least one operator public key (or leave adminAccess off).";
+      }
+      {
+        # The mesh-only perimeter is enforced by an interface-scoped firewall rule below; if the firewall
+        # is off, that rule does nothing and sshd is reachable from the LAN/underlay. firewall.enable is
+        # only mkDefault true, so a host can silently turn it off.
+        assertion = config.networking.firewall.enable;
+        message = "keepNode.adminAccess.enable is true but networking.firewall.enable is false: the mesh-only SSH perimeter depends on the interface-scoped firewall rule. Enable the firewall (or leave adminAccess off).";
+      }
+      {
+        # admin-access and debug-access define conflicting sshd settings, and debug-access re-exposes SSH
+        # on ALL interfaces with password auth + a known password, defeating the mesh-only perimeter.
+        assertion = !(config.keepNode.debugAccess.enable or false);
+        message = "keepNode.adminAccess.enable and keepNode.debugAccess.enable are both true: they define conflicting sshd settings, and debug-access re-exposes SSH on all interfaces with password auth. Enable only one.";
       }
     ];
 
@@ -52,10 +66,21 @@ in
       openssh.authorizedKeys.keys = cfg.authorizedKeys;
     };
 
-    # A key-only account has no password to type, so wheel gets passwordless sudo , the SSH key is the
-    # authentication. Still auditable (you log in as keepadmin; sudo is logged) and not root-by-default:
-    # a compromised session is not root until an explicit `sudo`.
-    security.sudo.wheelNeedsPassword = false;
+    # A key-only account has no password to type, so keepadmin gets passwordless sudo , the SSH key is
+    # the authentication. Scoped to keepadmin only (not global wheelNeedsPassword) so other wheel
+    # accounts don't silently inherit passwordless root. Still auditable (you log in as keepadmin; sudo
+    # is logged) and not root-by-default: a compromised session is not root until an explicit `sudo`.
+    security.sudo.extraRules = [
+      {
+        users = [ "keepadmin" ];
+        commands = [
+          {
+            command = "ALL";
+            options = [ "NOPASSWD" ];
+          }
+        ];
+      }
+    ];
 
     services.openssh = {
       enable = true;
@@ -77,7 +102,12 @@ in
         # Strongest: root is not a network-reachable username at all (even a leaked root key can't log
         # in over the network). Admin is keepadmin + sudo.
         PermitRootLogin = "no";
-        AllowUsers = [ "keepadmin" ];
+        # Daemon-level backstop matching vault-replication's rsyncd `hosts allow = 10.44/16`: sshd
+        # listens on 0.0.0.0, and the firewall interface rule below is the primary perimeter, but if that
+        # rule is absent (firewall off) or meshInterface drifts, this denies any source outside nvpn's
+        # mesh subnet (10.44.0.0/16) at auth time. sshd matches the numeric CIDR against the connecting
+        # address, so a LAN/underlay source is refused even with no firewall guard.
+        AllowUsers = [ "keepadmin@10.44.0.0/16" ];
         MaxAuthTries = 3;
         X11Forwarding = false;
         AllowTcpForwarding = false;
@@ -92,6 +122,11 @@ in
     # WireGuard underlay never reach sshd. Same pattern as the vault-replication rsync receiver. No
     # entry in the global allowedTCPPorts. (No fail2ban: it does nothing for key-only auth; sshd's
     # built-in PerSourcePenalties covers misbehaving sources.)
+    #
+    # COUPLING: meshInterface must match nvpn's actual runtime tun device (same coupling vault-
+    # replication carries). If it drifts, this rule opens the wrong interface (or none); the
+    # AllowUsers=keepadmin@10.44.0.0/16 CIDR backstop above is what covers a mismatch by denying any
+    # non-mesh source at auth time.
     networking.firewall.interfaces.${cfg.meshInterface}.allowedTCPPorts = [ 22 ];
   };
 }

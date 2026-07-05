@@ -119,5 +119,17 @@ in
           "ssh -i /root/id -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
           "-o ConnectTimeout=5 -o BatchMode=yes keepadmin@${ipBUnderlay} true"
       )
+
+      # 3. Key-only, over the MESH: an UNAUTHORIZED key is refused at auth (not the firewall). Generate a
+      # throwaway keypair that is NOT in keepadmin's authorized_keys and confirm the login fails.
+      nodeA.succeed('ssh-keygen -t ed25519 -N "" -f /root/wrong -q')
+      nodeA.fail(
+          f"ssh -i /root/wrong -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+          f"-o ConnectTimeout=10 -o BatchMode=yes keepadmin@{meshB} true"
+      )
+
+      # 4. Restricted user, over the MESH: root is refused (PermitRootLogin no / AllowUsers keepadmin@...),
+      # even presenting the authorized keepadmin key -- root is not a network-reachable username.
+      nodeA.fail(f"{ssh} root@{meshB} true")
     '';
 }
