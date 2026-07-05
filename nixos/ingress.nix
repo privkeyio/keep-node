@@ -106,6 +106,14 @@ in
 
     # Vaultwarden must know its public URL (links, WebAuthn, etc.) and must trust the proxy's
     # forwarded client IP, so its log (and thus fail2ban) bans the real attacker, not 127.0.0.1.
+    #
+    # SECURITY ASSUMPTION: IP_HEADER trusts X-Real-IP UNCONDITIONALLY. That is safe here ONLY because
+    # nginx is the SOLE reacher of Vaultwarden's loopback port (8222): Vaultwarden binds 127.0.0.1
+    # (vaultwarden.nix), nginx's recommendedProxySettings overwrites X-Real-IP with the real connection
+    # address on every proxied request, and no other loopback path terminates there. If a future change
+    # lets anything else reach 127.0.0.1:8222 (e.g. a mesh->localhost termination, or a local process),
+    # it could forge X-Real-IP to make fail2ban ban an attacker-chosen victim IP or dodge its own ban.
+    # Keep Vaultwarden's loopback port reachable by nginx only.
     services.vaultwarden.config = {
       DOMAIN = "https://${cfg.hostName}";
       IP_HEADER = "X-Real-IP";
