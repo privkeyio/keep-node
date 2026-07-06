@@ -5,20 +5,25 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch: {}
 
 permissions:
   contents: read
 
+# Key by PR number (stable across pushes to the same PR) so a new push reliably cancels the
+# still-running previous run instead of leaving two live runs fighting for the same runner slot.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   # Enumerate the flake's checks so each runs as its own isolated job below. Generated (not
   # hardcoded) so a newly added check is picked up automatically and can never silently stop
-  # running in CI.
+  # running in CI. The `nix eval` here evaluates the whole flake, so a syntax/eval error in ANY
+  # module fails this job (and the run) regardless of which checks the fast lane selects below.
   discover:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       checks: ${{ steps.list.outputs.checks }}
     steps:
@@ -27,8 +32,20 @@ jobs:
         # Pinned to a full commit SHA (v22) so CI never runs a mutable upstream ref.
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25
       - id: list
+        # The 16 checks are heavy QEMU VM tests; running the whole matrix on every PR push saturates
+        # the shared GitHub-hosted concurrency pool (starving other repos) and serializes into a long
+        # wall-clock. So: full matrix only on push to main, manual dispatch, or a PR labelled `full-ci`
+        # (always fully gating merges); a fast representative subset on ordinary PR pushes.
+        env:
+          FULL: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'full-ci') }}
         run: |
-          checks=$(nix eval --json '.#checks.x86_64-linux' --apply builtins.attrNames)
+          all=$(nix eval --json '.#checks.x86_64-linux' --apply builtins.attrNames)
+          if [ "$FULL" = "true" ]; then
+            checks="$all"
+          else
+            checks=$(printf '%s' "$all" \
+              | jq -c '[.[] | select(. == "formatting" or . == "single-node" or . == "mesh-admin-ssh")]')
+          fi
           echo "checks=$checks" >> "$GITHUB_OUTPUT"
 
   # Build the expensive shared packages once and PUSH them to the `privkey` Cachix binary cache, so
@@ -72,8 +89,14 @@ jobs:
     # suite or reports a false green. Still gate on discover, whose matrix output the checks consume.
     if: ${{ always() && needs.discover.result == 'success' }}
     runs-on: ubuntu-latest
+    # Hard ceiling per check: a VM test that hangs (KVM flake, VM never boots) is killed in minutes
+    # instead of holding a runner slot for GitHub's 6-hour default and starving everything behind it.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
+      # Cap how many checks run at once so a full-matrix run leaves slots in the shared runner pool for
+      # other repos, rather than occupying the entire account concurrency budget.
+      max-parallel: 6
       matrix:
         check: ${{ fromJSON(needs.discover.outputs.checks) }}
     steps:
