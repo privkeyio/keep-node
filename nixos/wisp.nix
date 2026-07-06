@@ -32,18 +32,40 @@ in
     };
 
     settings = lib.mkOption {
-      type = lib.types.attrs;
+      type = lib.types.attrsOf lib.types.anything;
       default = { };
       description = "Extra `services.wisp.settings` (merged; see the wisp module for the surface).";
     };
   };
 
   config = lib.mkIf cfg.enable {
+    assertions = [
+      {
+        # The mesh-only perimeter is enforced by the interface-scoped firewall rule below; if the
+        # firewall is off, that rule does nothing and the relay is reachable on 0.0.0.0 from the
+        # LAN/underlay. firewall.enable is only mkDefault true, so a host can silently turn it off.
+        # Unlike sshd (AllowUsers @10.44/16) and the rsync receiver (hosts allow = 10.44/16), wisp has
+        # NO application-layer source backstop, so this firewall rule is the ONLY perimeter and this
+        # assertion is load-bearing.
+        assertion = config.networking.firewall.enable;
+        message = "keepNode.wisp.enable is true but networking.firewall.enable is false: the mesh-only relay perimeter is the interface-scoped firewall rule, and wisp has no application-layer source restriction behind it. Enable the firewall (or leave wisp off).";
+      }
+      {
+        # wisp scopes its port to the mesh interface, which only exists when the mesh is up. Without the
+        # mesh, the interface rule opens a port on a non-existent iface: fail-closed (unreachable) with
+        # the firewall on, but combined with a disabled firewall it is a globally exposed relay.
+        assertion = config.keepNode.mesh.enable;
+        message = "keepNode.wisp.enable requires keepNode.mesh.enable (the transport the relay is scoped to; its port is opened only on the mesh interface).";
+      }
+    ];
+
     services.wisp = {
       enable = true;
       # Bind all interfaces at the socket; the mesh-interface firewall rule below is the perimeter (the
-      # mesh IP is runtime-assigned, so binding it directly is not an option). Matches the rsync
-      # receiver / sshd, which also listen broadly and are firewalled to the mesh.
+      # mesh IP is runtime-assigned, so binding it directly is not an option). Like the rsync receiver /
+      # sshd, the socket listens broadly and the firewall scopes it to the mesh, but those two ALSO
+      # carry an app-layer source ACL (hosts allow / AllowUsers) that wisp lacks, so here the firewall
+      # rule (assertion-guarded above) is the sole perimeter.
       host = "0.0.0.0";
       port = cfg.port;
       openFirewall = false; # NOT global; the interface-scoped rule below is the only opening

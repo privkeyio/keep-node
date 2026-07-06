@@ -87,6 +87,7 @@ in
     let
       stateDir = nodes.nodeB.keepNode.mesh.stateDir;
       ipAUnderlay = nodes.nodeA.networking.primaryIPAddress;
+      relayPort = toString nodes.nodeA.keepNode.wisp.port;
     in
     ''
       start_all()
@@ -104,9 +105,9 @@ in
       assert meshA.startswith("10.44."), meshA
 
       # 1. node B reaches node A's relay OVER THE MESH and gets a NIP-01 response.
-      nodeB.wait_until_succeeds(f"${pyClient}/bin/python3 ${probe} {meshA} 7777", timeout=60)
+      nodeB.wait_until_succeeds(f"${pyClient}/bin/python3 ${probe} {meshA} ${relayPort}", timeout=60)
 
       # 2. The SAME relay is REFUSED on node A's LAN/underlay address (mesh-only firewall).
-      nodeB.fail("${pyClient}/bin/python3 ${probe} ${ipAUnderlay} 7777")
+      nodeB.fail("${pyClient}/bin/python3 ${probe} ${ipAUnderlay} ${relayPort}")
     '';
 }
