@@ -1,7 +1,8 @@
 # Relay-based mesh discovery (bead keep-node-6wj / d3s), topology A. Two nodes form the encrypted mesh
 # with NO static peer endpoints , they advertise + learn each other's addresses over an off-mesh wisp
-# relay (nvpn kind-37195 adverts; LAN candidate sharing is on, so they discover each other's private VM
-# addresses). Proves relay-only discovery end to end; the npub roster still gates who may join.
+# relay (nvpn kind-37195 adverts). nvpn refuses to advertise RFC1918 addresses, so each node advertises
+# a routable-looking alias and its peer discovers THAT address over the relay. Proves relay-only
+# discovery end to end; the npub roster still gates who may join.
 #
 # This is the "dynamic/LAN address, no static endpoint" capability. True symmetric-NAT traversal
 # additionally needs wisp to relay ephemeral events (kind 21059, bead keep-node-1to) + a STUN server.
@@ -55,6 +56,8 @@ let
         discovery = {
           enable = true;
           relays = [ "ws://${nodes.relay.networking.primaryIPAddress}:7777" ];
+          # TEST-ONLY: the in-VM wisp relay is plaintext ws://; production discovery must use wss://.
+          allowInsecureWs = true;
         };
       };
     };
@@ -114,7 +117,9 @@ in
       assert meshB.startswith("10.44."), meshB
       nodeA.succeed(f"ping -c3 -W2 {meshB}")
 
-      # Discovery is configured (relays written to [nostr]) and static endpoints are absent.
+      # Discovery is configured (relays written to [nostr]) and static endpoints are absent: nvpn writes
+      # operator-set peer endpoints as a `fips_peer_endpoints` table, which must NOT appear here.
       nodeA.succeed("grep -q '^relays = ' ${stateDir}/.config/nvpn/config.toml")
+      nodeA.fail("grep -q 'fips_peer_endpoints' ${stateDir}/.config/nvpn/config.toml")
     '';
 }
