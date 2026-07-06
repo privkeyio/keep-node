@@ -237,11 +237,17 @@ in
           # makes nvpn try to SELECT a network by that id (which does not exist yet) -> "network not
           # found"; on its own, `--network-id` renames the active network.
           HOME="$d" ${lib.getExe cfg.package} set --participant "$selfnpub" ${participantArgs}
+          # Disable BOTH Nostr discovery and bootstrap-peer transit: `nvpn init` seeds config.toml with
+          # nvpn's PUBLIC fips_bootstrap_peers (its own infrastructure), which are "dialed as fallback
+          # transit" -- so on a node with internet the mesh would phone home to third-party relays. This
+          # is a static-endpoint private mesh (every peer's endpoint is set above), so neither is needed;
+          # turning them off keeps traffic on the operator's own endpoints only.
           HOME="$d" ${lib.getExe cfg.package} set --network-id ${lib.escapeShellArg cfg.networkId} \
             --listen-port ${toString cfg.listenPort} --fips-advertise-endpoint true \
             --endpoint ${lib.escapeShellArg cfg.selfEndpoint} \
             ${peerEndpointArgs} \
-            --fips-nostr-discovery-enabled false
+            --fips-nostr-discovery-enabled false \
+            --fips-bootstrap-enabled false
         ''}
       '';
     };

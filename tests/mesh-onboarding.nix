@@ -111,5 +111,13 @@ in
       # Confinement still in effect on the boot-enabled daemon.
       for prop in ["ProtectSystem=strict", "MemoryDenyWriteExecute=yes"]:
           nodeA.succeed(f"systemctl show keep-node-mesh.service | grep -qx '{prop}'")
+
+      # Both public-discovery/transit switches were accepted by `nvpn set` and persisted disabled: the
+      # mesh above formed purely on the operator's own static endpoints, so nvpn's third-party Nostr
+      # relays and bootstrap peers are dialed for nothing. Assert config persistence for both toggles
+      # (a VM can't reach public nvpn infra to test the behavior directly, so this locks in the intent).
+      for node in [nodeA, nodeB]:
+          for flag in ["fips_bootstrap_enabled = false", "fips_nostr_discovery_enabled = false"]:
+              node.succeed(f"grep -qx '{flag}' ${stateDir}/.config/nvpn/config.toml")
     '';
 }
