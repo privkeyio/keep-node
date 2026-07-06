@@ -388,6 +388,14 @@
             wispModule = wisp.nixosModules.wisp;
           };
         };
+        mesh-discovery = pkgs.testers.runNixOSTest {
+          imports = [ ./tests/mesh-discovery.nix ];
+          _module.args = {
+            nvpnPackage = nvpn;
+            inherit nvpnIdentityFixture;
+            wispModule = wisp.nixosModules.wisp;
+          };
+        };
         mesh-replication = pkgs.testers.runNixOSTest {
           imports = [ ./tests/mesh-replication.nix ];
           _module.args = {
