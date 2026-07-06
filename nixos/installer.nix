@@ -123,7 +123,10 @@ in
     keep-node installer
     ===================
     1) See your disks:        lsblk
-    2) Install (ERASES disk): install-keepnode /dev/nvme0n1 --ssh-key ~/.ssh/id_ed25519.pub
+    2) Install (ERASES disk): install-keepnode /dev/nvme0n1 --ssh-key "ssh-ed25519 AAAA... you@host"
+       --ssh-key takes your PUBLIC key inline (paste it), or a file path if you first copy the key
+       into this session (scp it from your machine, or bring it on a second USB). This live
+       environment is not your laptop, so ~/.ssh/id_ed25519.pub does not exist here.
     Then remove the USB and reboot; reach the node over key-only SSH (ssh keepadmin@<node-ip>).
 
   '';

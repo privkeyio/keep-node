@@ -44,7 +44,7 @@ in
         a key provisioned AFTER install. The generic installer ISO embeds a fixed closure (the key
         cannot be baked into config at install time), so it writes the operator's key here instead.
         Complements `authorizedKeys`. The file may be absent/empty at build time, so on its own it does
-        NOT satisfy the anti-lockout check , the installer is responsible for populating it and refusing
+        NOT satisfy the anti-lockout check; the installer is responsible for populating it and refusing
         to proceed with no key.
       '';
     };

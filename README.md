@@ -62,12 +62,12 @@ Build a bootable USB installer and install keep-node on a real UEFI machine.
 3. Boot the target machine from the USB (UEFI; disable Secure Boot if it won't boot, the image isn't Secure-Boot-signed), then install to the internal disk:
 
    ```bash
-   install-keepnode /dev/sda --ssh-key ~/.ssh/id_ed25519.pub   # target's internal disk, NOT the USB
+   install-keepnode /dev/sda --ssh-key "ssh-ed25519 AAAA... you@host"   # /dev/sda is the target's internal disk, NOT the USB
    ```
 
-   It auto-elevates, wipes the disk, partitions UEFI, installs offline, and enrolls your SSH public key. Type `YES` to confirm. When it finishes, remove the USB and reboot. `--ssh-key` is required: the image has no password, so your key is how you reach the node.
+   It auto-elevates, wipes the disk, partitions UEFI, installs offline, and enrolls your SSH public key. Type `YES` to confirm. When it finishes, remove the USB and reboot. `--ssh-key` is required (the image has no password, so your key is how you reach the node) and accepts the public key inline as shown, or a file path. The installer's live session is not your laptop, so `~/.ssh/id_ed25519.pub` won't exist there unless you put it there first (paste the key inline, `scp` your `.pub` in, or bring it on a second USB).
 
-4. After first boot, reach the node over **key-only SSH** from a machine on the same LAN , there is no password login:
+4. After first boot, reach the node over **key-only SSH** from a machine on the same LAN (there is no password login):
 
    ```bash
    ssh keepadmin@<node-ip>      # find <node-ip> from your DHCP leases or the node's console

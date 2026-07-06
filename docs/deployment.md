@@ -94,9 +94,9 @@ ssh keepadmin@10.44.x.y     # the node's mesh IP; not reachable from the LAN
 ## Installer bring-up (generic ISO)
 
 Mesh-only admin assumes your laptop is already a rostered mesh peer. For a co-owned cluster you author
-that in from the start (step 2). For a box installed from the generic ISO , where the operator key
-isn't known at build time , `install-keepnode --ssh-key <pubkey|file>` enrolls your key at install
-time into a runtime file (`keepNode.adminAccess.authorizedKeysFile`) that the fixed closure reads. The
+that in from the start (step 2). For a box installed from the generic ISO, where the operator key
+isn't known at build time, `install-keepnode --ssh-key <pubkey|file>` enrolls your key at install time
+into a runtime file (`keepNode.adminAccess.authorizedKeysFile`) that the fixed closure reads. The
 installed image is the **hardened** profile (no known password, key-only SSH, `debugAccess` off), with
 `keepNode.adminAccess.lanBringup = true` so the key-only SSH is reachable on the LAN for first contact:
 
