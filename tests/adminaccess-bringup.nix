@@ -46,9 +46,17 @@ in
           "-o BatchMode=yes -o ConnectTimeout=10"
       )
 
-      # Hardened posture holds even in bring-up: key-only, no root.
+      # Hardened posture holds even in bring-up: key-only (no password, no keyboard-interactive), no root.
       box.succeed("sshd -T | grep -qx 'passwordauthentication no'")
+      box.succeed("sshd -T | grep -qx 'kbdinteractiveauthentication no'")
       box.succeed("sshd -T | grep -qx 'permitrootlogin no'")
+
+      # Bring-up widens the source restriction to RFC1918 rather than dropping it: a public/WAN source is
+      # still refused at auth time even though the firewall opening is global during bring-up. sshd -T
+      # emits one `allowusers` line per entry.
+      box.succeed("sshd -T | grep -qx 'allowusers keepadmin@10.0.0.0/8'")
+      box.succeed("sshd -T | grep -qx 'allowusers keepadmin@172.16.0.0/12'")
+      box.succeed("sshd -T | grep -qx 'allowusers keepadmin@192.168.0.0/16'")
 
       # LAN-reachable (lanBringup) AND the runtime-file key is honoured -> login over the LAN IP succeeds
       # with passwordless sudo. If lanBringup were off, the LAN would be firewalled and this would fail.

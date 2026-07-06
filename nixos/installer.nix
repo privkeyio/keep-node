@@ -17,7 +17,7 @@ let
     sshkey=""
     while [ "$#" -gt 0 ]; do
       case "$1" in
-        --ssh-key) sshkey="''${2:-}"; shift 2 ;;
+        --ssh-key) sshkey="''${2:-}"; shift 2 2>/dev/null || shift ;;
         --ssh-key=*) sshkey="''${1#--ssh-key=}"; shift ;;
         -*) echo "unknown option: $1" >&2; exit 1 ;;
         *) disk="$1"; shift ;;
@@ -37,6 +37,8 @@ let
     # The hardened image has NO known password: the operator's SSH public key is enrolled so the node
     # is reachable (key-only) after first boot. Require it rather than install an unreachable box.
     if [ -n "$sshkey" ] && [ -f "$sshkey" ]; then sshkey="$(${pkgs.coreutils}/bin/cat "$sshkey")"; fi
+    # The prefix check rejects a private key or obvious junk; ssh-keygen then actually parses the key
+    # body, so a typo like "ssh-ed25519 garbage" can't enroll a permanently-unreachable node.
     case "$sshkey" in
       "ssh-ed25519 "* | "ssh-rsa "* | "ecdsa-"* | "sk-ssh-"* | "sk-ecdsa-"*) : ;;
       *)
@@ -45,6 +47,10 @@ let
         exit 1
         ;;
     esac
+    if ! printf '%s\n' "$sshkey" | ${pkgs.openssh}/bin/ssh-keygen -lf /dev/stdin >/dev/null 2>&1; then
+      echo "install-keepnode: --ssh-key is not a valid OpenSSH public key (failed to parse)." >&2
+      exit 1
+    fi
 
     echo "This will ERASE everything on $disk:"
     ${pkgs.util-linux}/bin/lsblk -o NAME,SIZE,TYPE,MODEL,SERIAL "$disk"

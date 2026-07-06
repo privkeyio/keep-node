@@ -54,10 +54,11 @@ in
       default = false;
       description = ''
         Bring-up escape hatch: ALSO expose the key-only SSH on all interfaces (the LAN), not just the
-        mesh, and drop the `@10.44/16` source restriction. A freshly-installed generic node is not on a
-        mesh yet, so this is the only way to reach it for onboarding. Still key-only (no password),
-        unlike the debug profile. Leave false for a declarative deploy (mesh-only); flip back to false
-        once the node has joined the mesh.
+        mesh, and widen the `@10.44/16` source restriction to the private RFC1918 ranges (so LAN
+        onboarding works while a public/WAN source is still refused at auth time). A freshly-installed
+        generic node is not on a mesh yet, so this is the only way to reach it for onboarding. Still
+        key-only (no password), unlike the debug profile. Leave false for a declarative deploy
+        (mesh-only); flip back to false once the node has joined the mesh.
       '';
     };
   };
@@ -139,9 +140,19 @@ in
         # listens on 0.0.0.0, and the firewall interface rule below is the primary perimeter, but if that
         # rule is absent (firewall off) or meshInterface drifts, this denies any source outside nvpn's
         # mesh subnet (10.44.0.0/16) at auth time. sshd matches the numeric CIDR against the connecting
-        # address, so a LAN/underlay source is refused even with no firewall guard. Bring-up drops the
-        # CIDR (a fresh node has no mesh yet), so LAN key-only reach works for onboarding.
-        AllowUsers = if cfg.lanBringup then [ "keepadmin" ] else [ "keepadmin@10.44.0.0/16" ];
+        # address, so a LAN/underlay source is refused even with no firewall guard. Bring-up widens the
+        # restriction to the private (RFC1918) ranges rather than dropping it: a fresh node has no mesh
+        # yet and is reached over the LAN, but a public/WAN source is still refused at auth time even
+        # though the bring-up firewall opening is global. Mesh (10.44/16) stays reachable within 10/8.
+        AllowUsers =
+          if cfg.lanBringup then
+            [
+              "keepadmin@10.0.0.0/8"
+              "keepadmin@172.16.0.0/12"
+              "keepadmin@192.168.0.0/16"
+            ]
+          else
+            [ "keepadmin@10.44.0.0/16" ];
         MaxAuthTries = 3;
         X11Forwarding = false;
         AllowTcpForwarding = false;
@@ -158,9 +169,10 @@ in
     # built-in PerSourcePenalties covers misbehaving sources.)
     #
     # COUPLING: meshInterface must match nvpn's actual runtime tun device (same coupling vault-
-    # replication carries). If it drifts, this rule opens the wrong interface (or none); the
-    # AllowUsers=keepadmin@10.44.0.0/16 CIDR backstop above is what covers a mismatch by denying any
-    # non-mesh source at auth time.
+    # replication carries). If it drifts, this rule opens the wrong interface (or none); in the default
+    # mesh-only deploy the AllowUsers=keepadmin@10.44.0.0/16 CIDR backstop above covers a mismatch by
+    # denying any non-mesh source at auth time. (Under lanBringup the backstop is intentionally widened
+    # to RFC1918, which still denies public/WAN sources but allows the LAN for onboarding.)
     networking.firewall.interfaces.${cfg.meshInterface}.allowedTCPPorts = [ 22 ];
 
     # Bring-up only: ALSO open SSH globally (the LAN), because a fresh node has no mesh to reach it
