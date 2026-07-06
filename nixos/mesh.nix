@@ -22,6 +22,10 @@ let
   # Declarative onboarding is on once a static roster is configured. It provisions + boot-enables the
   # mesh from config; empty `peers` leaves the old manual (test/onboard-by-hand) behaviour untouched.
   declarative = cfg.peers != [ ];
+  # Relay-based discovery replaces static per-peer endpoints: keep the npub roster, drop the endpoints,
+  # turn on Nostr discovery, and write the relay list into config.toml ([nostr].relays; no `set` flag).
+  discoveryEnabled = cfg.discovery.enable;
+  relaysToml = lib.concatMapStringsSep ", " (r: ''"${r}"'') cfg.discovery.relays;
   # `nvpn set` roster args: each peer is both a participant and a static endpoint hint. This node's own
   # npub is added at runtime (read from the placed identity), since it isn't known at eval time.
   participantArgs = lib.concatMapStringsSep " " (
@@ -30,6 +34,9 @@ let
   peerEndpointArgs = lib.concatMapStringsSep " " (
     p: "--fips-peer-endpoint ${lib.escapeShellArg "${p.npub}=${p.endpoint}"}"
   ) cfg.peers;
+  # Flags shared by both `nvpn set` mode branches below: this node's own network id, listen port, and
+  # advertised endpoint. Each branch then appends its mode-specific discovery/endpoint flags.
+  baseSetArgs = "--network-id ${lib.escapeShellArg cfg.networkId} --listen-port ${toString cfg.listenPort} --fips-advertise-endpoint true --endpoint ${lib.escapeShellArg cfg.selfEndpoint}";
 in
 {
   options.keepNode.mesh = {
@@ -95,13 +102,52 @@ in
               description = "The peer's nvpn Nostr identity (npub).";
             };
             endpoint = lib.mkOption {
-              type = lib.types.str;
+              type = lib.types.nullOr lib.types.str;
+              default = null;
               example = "192.0.2.11:51820";
-              description = "The peer's advertised underlay endpoint (`ip:port`).";
+              description = ''
+                The peer's advertised underlay endpoint (`ip:port`). Required in static mode; leave null
+                (the default) in `discovery.enable` mode, where the endpoint is discovered over a relay.
+              '';
             };
           };
         }
       );
+    };
+
+    discovery = {
+      enable = lib.mkEnableOption ''
+        relay-based endpoint discovery instead of static peer endpoints: peers advertise and learn each
+        other's current address over a Nostr relay (nvpn kind-37195 adverts), so nodes with dynamic or
+        LAN-local addresses form the mesh without a fixed `endpoint` per peer. The npub roster
+        (`peers[].npub`) still gates who may join, so authenticity stays npub-gated; the relay only
+        brokers addresses for already-trusted npubs. It is, though, an availability and metadata
+        dependency: it sees the adverts (npubs + endpoints) and, if unreachable, discovery stalls'';
+
+      relays = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ ];
+        example = [ "wss://bootstrap.example.com:7777" ];
+        description = ''
+          Nostr relay URLs peers use to discover each other (written to `[nostr] relays`). These must be
+          reachable OFF the mesh (a not-yet-meshed node can't use the mesh-bound relay to join), e.g. a
+          bootstrap wisp on a reachable address. Use `wss://`: in discovery mode the node publishes its
+          npub and advertised endpoint to these relays, so over plaintext `ws://` that mesh metadata is
+          cleartext and unauthenticated, readable/tamperable by an on-path attacker. `ws://` is rejected
+          unless `allowInsecureWs` is set. nvpn refuses to advertise RFC1918 addresses, so a node behind
+          a private address advertises whatever routable endpoint it is given (`selfEndpoint`).
+        '';
+      };
+
+      allowInsecureWs = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          Test-only. When true, `discovery.relays` may use plaintext `ws://` instead of `wss://`. This
+          exists solely so the VM test can run against an in-VM plaintext wisp relay; it MUST never be
+          enabled in production, where discovery adverts (npub + endpoint) must stay over TLS (`wss://`).
+        '';
+      };
     };
 
     identityDir = lib.mkOption {
@@ -125,8 +171,47 @@ in
         message = "keepNode.mesh.enable is true but keepNode.mesh.package is null: no nvpn binary to run.";
       }
       {
+        # The node advertises its own dialable address (selfEndpoint) in BOTH modes; discovery only
+        # changes how PEERS' addresses are learned (over the relay vs configured), not the node's own.
         assertion = !declarative || cfg.selfEndpoint != null;
-        message = "keepNode.mesh.peers is set (declarative onboarding) but keepNode.mesh.selfEndpoint is null: the node must advertise its own ip:port endpoint for peers to reach it.";
+        message = "keepNode.mesh.peers is set (declarative onboarding) but keepNode.mesh.selfEndpoint is null: the node must advertise its own ip:port endpoint (statically to peers, or over the relay in discovery mode).";
+      }
+      {
+        # Static mode dials each peer at a fixed endpoint; discovery mode learns it over a relay.
+        assertion = !declarative || discoveryEnabled || lib.all (p: p.endpoint != null) cfg.peers;
+        message = "keepNode.mesh: every peer needs an `endpoint` in static mode (or set keepNode.mesh.discovery.enable to discover endpoints over a relay).";
+      }
+      {
+        assertion = !discoveryEnabled || cfg.discovery.relays != [ ];
+        message = "keepNode.mesh.discovery.enable is true but keepNode.mesh.discovery.relays is empty: peers need at least one off-mesh Nostr relay to discover each other over.";
+      }
+      {
+        # discovery.enable only takes effect through the declarative provisioning block, which is gated on
+        # a non-empty peers roster; with peers = [] the whole block AND wantedBy = multi-user.target are
+        # skipped, so the mesh would silently never start.
+        assertion = !discoveryEnabled || declarative;
+        message = "keepNode.mesh.discovery.enable is true but keepNode.mesh.peers is empty: discovery is provisioned only for a declarative roster, so with no peers the mesh is never started. Provide the peer npub roster in keepNode.mesh.peers.";
+      }
+      {
+        # discovery.relays are the one external value in this module interpolated RAW (no escapeShellArg)
+        # into the root-run sed program and into config.toml. Constrain every entry to a ws(s):// URL over
+        # a safe charset so no shell/sed/TOML metacharacter (quote, backslash, bracket, newline, ...) can
+        # inject into the prepare unit or corrupt the TOML -- this is what makes that raw write safe.
+        assertion =
+          !discoveryEnabled
+          || lib.all (r: builtins.match "wss?://[A-Za-z0-9.:/_%?=&#-]+" r != null) cfg.discovery.relays;
+        message = "keepNode.mesh.discovery.relays must each be a ws:// or wss:// URL using only the characters [A-Za-z0-9.:/_%?=&#-]: a relay containing shell or TOML metacharacters would inject into the root prepare unit's config.toml write.";
+      }
+      {
+        # In discovery mode the node publishes its npub + advertised endpoint to these relays; over
+        # plaintext ws:// that metadata is cleartext and the relay is unauthenticated (eavesdrop/MITM of
+        # adverts). Require wss:// unless the test-only allowInsecureWs opt-in is set. Mirrors the same
+        # gate on keepNode.frostGate.allowInsecureWs.
+        assertion =
+          !discoveryEnabled
+          || cfg.discovery.allowInsecureWs
+          || lib.all (r: lib.hasPrefix "wss://" r) cfg.discovery.relays;
+        message = "keepNode.mesh.discovery.relays contains a plaintext ws:// relay: discovery publishes this node's npub and advertised endpoint over them, so they must be wss://. Set keepNode.mesh.discovery.allowInsecureWs = true to permit ws:// (TEST-ONLY: the adverts then travel in cleartext and are MITM-able, and it must never be set on a real deployment).";
       }
       {
         # Declarative onboarding pins peers to the npubs baked into each node's static roster (relay
@@ -225,29 +310,55 @@ in
           }
         fi
         ${lib.optionalString declarative ''
-          # Declarative roster + STATIC peer endpoints (no relay discovery -- the path upstream proves).
+          # Declarative onboarding: apply the npub roster, then either static endpoints or discovery.
           # This node is a participant too; read its own npub from the placed identity.
           selfnpub="$(${pkgs.gawk}/bin/awk '/^\[nostr\]/{n=1;next} /^\[/{n=0} n&&/^public_key/{print $3}' "$cfgdir/config.toml" | tr -d '"')"
           [ -n "$selfnpub" ] || { echo "keep-node-mesh-prepare: could not read this node's npub from $cfgdir/config.toml" >&2; exit 1; }
           # Publish the resolved npub (public value) so consumers read this one file instead of
           # re-parsing config.toml's TOML with their own copy of the brittle awk above.
           printf '%s' "$selfnpub" > "$d/selfnpub"
-          # Two calls, mirroring the proven tests/mesh.nix sequence: set the roster on the ACTIVE
-          # network first, THEN the network-id + endpoints. Combining `--network-id` with `--participant`
-          # makes nvpn try to SELECT a network by that id (which does not exist yet) -> "network not
-          # found"; on its own, `--network-id` renames the active network.
+          # Roster first on the ACTIVE network, THEN the network-id: combining `--network-id` with
+          # `--participant` makes nvpn SELECT a network by that id (which does not exist yet) -> "network
+          # not found"; on its own `--network-id` renames the active network.
           HOME="$d" ${lib.getExe cfg.package} set --participant "$selfnpub" ${participantArgs}
-          # Disable BOTH Nostr discovery and bootstrap-peer transit: `nvpn init` seeds config.toml with
-          # nvpn's PUBLIC fips_bootstrap_peers (its own infrastructure), which are "dialed as fallback
-          # transit" -- so on a node with internet the mesh would phone home to third-party relays. This
-          # is a static-endpoint private mesh (every peer's endpoint is set above), so neither is needed;
-          # turning them off keeps traffic on the operator's own endpoints only.
-          HOME="$d" ${lib.getExe cfg.package} set --network-id ${lib.escapeShellArg cfg.networkId} \
-            --listen-port ${toString cfg.listenPort} --fips-advertise-endpoint true \
-            --endpoint ${lib.escapeShellArg cfg.selfEndpoint} \
-            ${peerEndpointArgs} \
-            --fips-nostr-discovery-enabled false \
-            --fips-bootstrap-enabled false
+          ${
+            if discoveryEnabled then
+              ''
+                # Discovery mode: peers advertise + learn endpoints over the relay(s), so no static
+                # `--endpoint`/`--fips-peer-endpoint`. This node still advertises its OWN address
+                # (--endpoint) so peers can dial it; only the PEERS' endpoints are discovered. Without a
+                # concrete own endpoint, a wildcard bind falls to STUN, and with no reachable STUN server
+                # the node advertises nothing and the mesh never forms (true dynamic-IP nodes need
+                # STUN/external discovery, out of scope here). nvpn refuses to advertise RFC1918
+                # addresses, so selfEndpoint must be a routable address peers can reach.
+                HOME="$d" ${lib.getExe cfg.package} set ${baseSetArgs} \
+                  --fips-nostr-discovery-enabled true \
+                  --fips-bootstrap-enabled false
+                # `nvpn set` has no relay flag, so write [nostr].relays into config.toml -- AFTER the set
+                # above, whose read-modify-write of config.toml would otherwise drop it. `nvpn init` seeds
+                # its own default PUBLIC relays, so an append-only guard would never apply the configured
+                # relay; instead converge to the desired set on every boot (rotation-safe: an operator can
+                # drop a hostile relay). Delete any existing relays line, then insert the configured one
+                # under [nostr]: idempotent, no duplicate TOML key. The relay URLs are asserted to be
+                # ws(s):// over a safe charset, so this raw interpolation cannot inject shell/sed/TOML
+                # metacharacters.
+                ${pkgs.gnused}/bin/sed -i \
+                  -e '/^relays = /d' \
+                  -e '/^\[nostr\]/a relays = [ ${relaysToml} ]' \
+                  "$cfgdir/config.toml"
+              ''
+            else
+              ''
+                # Static mode: dial each peer at its fixed endpoint; disable Nostr discovery AND
+                # bootstrap-peer transit (nvpn init seeds public fips_bootstrap_peers, "dialed as fallback
+                # transit", which would phone home to third-party relays). Every endpoint is set, so
+                # neither is needed; this keeps traffic on the operator's own endpoints only.
+                HOME="$d" ${lib.getExe cfg.package} set ${baseSetArgs} \
+                  ${peerEndpointArgs} \
+                  --fips-nostr-discovery-enabled false \
+                  --fips-bootstrap-enabled false
+              ''
+          }
         ''}
       '';
     };

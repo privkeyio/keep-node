@@ -207,11 +207,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1783363269,
-        "narHash": "sha256-qZjxhUF+RPtxyR1RT1AgOwnFnc7p8Oitk/QFe1t1NCs=",
+        "lastModified": 1783379187,
+        "narHash": "sha256-8kCt8JaFKXNm5iDvuUNwZPsQInzskKetJk3fTqzkDZQ=",
         "owner": "privkeyio",
         "repo": "wisp",
-        "rev": "424e2f02bee187095ce9a4db73bbaaa31708194a",
+        "rev": "7b9e9d31b912d4c81964265f91d84643ce5c0334",
         "type": "github"
       },
       "original": {
