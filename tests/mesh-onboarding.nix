@@ -112,10 +112,12 @@ in
       for prop in ["ProtectSystem=strict", "MemoryDenyWriteExecute=yes"]:
           nodeA.succeed(f"systemctl show keep-node-mesh.service | grep -qx '{prop}'")
 
-      # nvpn's PUBLIC bootstrap peers are disabled: this private mesh formed on the operator's own static
-      # endpoints (the ping above) and phones home to nvpn's third-party relays for nothing. That the
-      # mesh is up with bootstrap off proves static endpoints don't need it.
+      # Both public-discovery/transit switches were accepted by `nvpn set` and persisted disabled: the
+      # mesh above formed purely on the operator's own static endpoints, so nvpn's third-party Nostr
+      # relays and bootstrap peers are dialed for nothing. Assert config persistence for both toggles
+      # (a VM can't reach public nvpn infra to test the behavior directly, so this locks in the intent).
       for node in [nodeA, nodeB]:
-          node.succeed("grep -qx 'fips_bootstrap_enabled = false' ${stateDir}/.config/nvpn/config.toml")
+          for flag in ["fips_bootstrap_enabled = false", "fips_nostr_discovery_enabled = false"]:
+              node.succeed(f"grep -qx '{flag}' ${stateDir}/.config/nvpn/config.toml")
     '';
 }
