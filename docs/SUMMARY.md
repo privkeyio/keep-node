@@ -6,5 +6,6 @@
 - [Threshold Unlock](./threshold-unlock.md)
 - [Security](./SECURITY.md)
 - [Deployment](./deployment.md)
+- [Hardware bring-up](./hardware.md)
 - [Multi-node sync (design)](./multi-node-sync.md)
 - [Attribution](./attribution.md)

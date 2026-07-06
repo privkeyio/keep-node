@@ -36,7 +36,9 @@ nix build .#checks.x86_64-linux.single-node.driverInteractive
 
 ## Install on hardware
 
-Build a bootable USB installer and install keep-node on a real UEFI machine.
+Build a bootable USB installer and install keep-node on a real UEFI machine. For a full tier-by-tier
+runbook (BIOS/TPM/Secure-Boot settings, the encrypted-volume and measured-boot setup, and multi-node
+HA), see [Hardware bring-up](docs/hardware.md).
 
 1. Build the installer ISO (requires Nix with flakes; produces a ~1.4 GB UEFI hybrid ISO):
 
