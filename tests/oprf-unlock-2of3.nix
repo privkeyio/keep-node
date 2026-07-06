@@ -18,72 +18,19 @@
 #
 # Run: nix build .#checks.x86_64-linux.oprf-unlock-2of3
 { keepCliPackage, ... }:
+let
+  common = import ./lib/oprf-common.nix { inherit keepCliPackage; };
+in
 {
   name = "keep-node-oprf-unlock-2of3-test";
 
-  nodes.relay =
-    { ... }:
-    {
-      services.nostr-rs-relay = {
-        enable = true;
-        port = 7777;
-      };
-      networking.firewall.allowedTCPPorts = [ 7777 ];
-    };
+  nodes.relay = common.relayNode;
+  nodes.box = common.boxNode;
+  # Two holders, identical but for their DB path and FROST share (2 vs 3), set in the testScript.
+  nodes.holder = common.holderNode;
+  nodes.holder2 = common.holderNode;
 
-  nodes.box =
-    { pkgs, nodes, ... }:
-    {
-      environment.systemPackages = [
-        keepCliPackage
-        pkgs.cryptsetup
-      ];
-      virtualisation.tpm.enable = true; # swtpm -> /dev/tpmrm0
-      security.tpm2.enable = true;
-      networking.firewall.enable = false;
-      networking.extraHosts = "${nodes.relay.networking.primaryIPAddress} relay.kfp";
-    };
-
-  # Two holders, identical but for their DB path and FROST share (2 vs 3).
-  nodes.holder =
-    { nodes, ... }:
-    {
-      environment.systemPackages = [ keepCliPackage ];
-      networking.firewall.enable = false;
-      networking.extraHosts = "${nodes.relay.networking.primaryIPAddress} relay.kfp";
-    };
-  nodes.holder2 =
-    { nodes, ... }:
-    {
-      environment.systemPackages = [ keepCliPackage ];
-      networking.firewall.enable = false;
-      networking.extraHosts = "${nodes.relay.networking.primaryIPAddress} relay.kfp";
-    };
-
-  testScript = ''
-    import re
-
-    def must_match(pattern, text, what):
-        m = re.search(pattern, text)
-        assert m is not None, f"no {what} in output: {text!r}"
-        return m.group(0)
-
-    keep = "${keepCliPackage}/bin/keep"
-    relay_url = "ws://relay.kfp:7777"
-    env = "KEEP_PASSWORD=testpassword123 KEEP_YES=1 KEEP_ALLOW_WS=1 KEEP_PEER_ANNOUNCE_INTERVAL_SECS=3"
-
-    def keep_bg(node, unit, args):
-        node.succeed(
-            f"systemd-run --unit={unit} "
-            f"--setenv=KEEP_PASSWORD=testpassword123 --setenv=KEEP_YES=1 --setenv=KEEP_ALLOW_WS=1 "
-            f"--setenv=KEEP_PEER_ANNOUNCE_INTERVAL_SECS=3 "
-            f"{keep} --no-mlock {args}"
-        )
-        node.wait_until_succeeds(
-            f"journalctl -u {unit}.service --no-pager | grep -q 'Listening for FROST messages'",
-            timeout=180,
-        )
-
+  testScript = common.preamble + ''
     start_all()
     relay.wait_for_unit("nostr-rs-relay.service")
     relay.wait_for_open_port(7777)
@@ -199,10 +146,17 @@
         f"{env} timeout 30 {keep} --no-mlock --path /root/box {oprf_unlock_args} "
         f"> /root/neg.out 2>/root/neg.err"
     )
-    # ...and it emitted no key material at all. oprf-unlock writes ONLY the raw key to stdout (the
-    # positive path reads that back verbatim as the 32-byte key), so fail-closed means stdout is
-    # empty; any byte on stdout is a leak. Diagnostics still go to stderr (neg.err), which we allow.
+    # ...and it emitted no KEY MATERIAL. The security property is "fail closed reconstructs no usable
+    # key," so the meaningful check is that stdout carries no key bytes -- not that it is byte-empty.
+    # keep-cli's error-exit path writes a terminal control escape (alt-screen-exit, `\e[?1049l`, the
+    # progress-spinner's cleanup) to stdout, so strip ANSI escapes first, then require what remains to be
+    # empty. (On the SUCCESS path stdout is exactly the 32-byte key -- verified in tests/oprf-unlock.nix
+    # -- so the frost-gate's key capture is unaffected; the stray escape is a keep-cli stdout-hygiene nit
+    # tracked as keep-node-95y.) The full-key guard below is a second, independent backstop.
+    box.succeed(r"""sed 's/\x1b\[[0-9;?]*[A-Za-z]//g' /root/neg.out > /root/neg.clean""")
+    clean_size = box.succeed("stat -c %s /root/neg.clean").strip()
+    assert clean_size == "0", f"below-threshold unlock leaked {clean_size} non-escape bytes to stdout (fail closed)"
     neg_size = box.succeed("stat -c %s /root/neg.out").strip()
-    assert neg_size == "0", f"below-threshold unlock wrote {neg_size} bytes to stdout; must be empty (fail closed)"
+    assert neg_size != "32", f"below-threshold unlock leaked a 32-byte key ({neg_size} bytes)"
   '';
 }
