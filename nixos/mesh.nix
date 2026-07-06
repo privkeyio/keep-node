@@ -34,6 +34,9 @@ let
   peerEndpointArgs = lib.concatMapStringsSep " " (
     p: "--fips-peer-endpoint ${lib.escapeShellArg "${p.npub}=${p.endpoint}"}"
   ) cfg.peers;
+  # Flags shared by both `nvpn set` mode branches below: this node's own network id, listen port, and
+  # advertised endpoint. Each branch then appends its mode-specific discovery/endpoint flags.
+  baseSetArgs = "--network-id ${lib.escapeShellArg cfg.networkId} --listen-port ${toString cfg.listenPort} --fips-advertise-endpoint true --endpoint ${lib.escapeShellArg cfg.selfEndpoint}";
 in
 {
   options.keepNode.mesh = {
@@ -328,9 +331,7 @@ in
                 # the node advertises nothing and the mesh never forms (true dynamic-IP nodes need
                 # STUN/external discovery, out of scope here). nvpn refuses to advertise RFC1918
                 # addresses, so selfEndpoint must be a routable address peers can reach.
-                HOME="$d" ${lib.getExe cfg.package} set --network-id ${lib.escapeShellArg cfg.networkId} \
-                  --listen-port ${toString cfg.listenPort} --fips-advertise-endpoint true \
-                  --endpoint ${lib.escapeShellArg cfg.selfEndpoint} \
+                HOME="$d" ${lib.getExe cfg.package} set ${baseSetArgs} \
                   --fips-nostr-discovery-enabled true \
                   --fips-bootstrap-enabled false
                 # `nvpn set` has no relay flag, so write [nostr].relays into config.toml -- AFTER the set
@@ -352,9 +353,7 @@ in
                 # bootstrap-peer transit (nvpn init seeds public fips_bootstrap_peers, "dialed as fallback
                 # transit", which would phone home to third-party relays). Every endpoint is set, so
                 # neither is needed; this keeps traffic on the operator's own endpoints only.
-                HOME="$d" ${lib.getExe cfg.package} set --network-id ${lib.escapeShellArg cfg.networkId} \
-                  --listen-port ${toString cfg.listenPort} --fips-advertise-endpoint true \
-                  --endpoint ${lib.escapeShellArg cfg.selfEndpoint} \
+                HOME="$d" ${lib.getExe cfg.package} set ${baseSetArgs} \
                   ${peerEndpointArgs} \
                   --fips-nostr-discovery-enabled false \
                   --fips-bootstrap-enabled false
