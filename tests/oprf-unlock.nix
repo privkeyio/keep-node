@@ -203,8 +203,8 @@ in
         f"--share-file /root/box-oprf.share "
         f"> /root/neg-unlock.out 2>/root/neg-unlock.err"
     )
-    # ...and it emitted no usable key material: a failed unlock must not leak a 32-byte key.
-    neg_size = box.succeed("stat -c %s /root/neg-unlock.out").strip()
-    assert neg_size != "32", f"below-threshold unlock leaked a 32-byte key ({neg_size} bytes)"
+    # ...and it emitted no usable key material: a failed unlock must leak no key bytes to stdout. The
+    # shared helper strips keep-cli's error-path terminal escape before asserting the remainder is empty.
+    fail_closed(box, "/root/neg-unlock.out")
   '';
 }

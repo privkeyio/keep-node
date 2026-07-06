@@ -146,17 +146,8 @@ in
         f"{env} timeout 30 {keep} --no-mlock --path /root/box {oprf_unlock_args} "
         f"> /root/neg.out 2>/root/neg.err"
     )
-    # ...and it emitted no KEY MATERIAL. The security property is "fail closed reconstructs no usable
-    # key," so the meaningful check is that stdout carries no key bytes -- not that it is byte-empty.
-    # keep-cli's error-exit path writes a terminal control escape (alt-screen-exit, `\e[?1049l`, the
-    # progress-spinner's cleanup) to stdout, so strip ANSI escapes first, then require what remains to be
-    # empty. (On the SUCCESS path stdout is exactly the 32-byte key -- verified in tests/oprf-unlock.nix
-    # -- so the frost-gate's key capture is unaffected; the stray escape is a keep-cli stdout-hygiene nit
-    # tracked as keep-node-95y.) The full-key guard below is a second, independent backstop.
-    box.succeed(r"""sed 's/\x1b\[[0-9;?]*[A-Za-z]//g' /root/neg.out > /root/neg.clean""")
-    clean_size = box.succeed("stat -c %s /root/neg.clean").strip()
-    assert clean_size == "0", f"below-threshold unlock leaked {clean_size} non-escape bytes to stdout (fail closed)"
-    neg_size = box.succeed("stat -c %s /root/neg.out").strip()
-    assert neg_size != "32", f"below-threshold unlock leaked a 32-byte key ({neg_size} bytes)"
+    # ...and it emitted no KEY MATERIAL: a failed unlock must leak no key bytes to stdout. The shared
+    # helper strips keep-cli's error-path terminal escape before asserting the remainder is empty.
+    fail_closed(box, "/root/neg.out")
   '';
 }
