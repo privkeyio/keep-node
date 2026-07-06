@@ -19,86 +19,17 @@
 #
 # Run: nix build .#checks.x86_64-linux.oprf-unlock
 { keepCliPackage, ... }:
+let
+  common = import ./lib/oprf-common.nix { inherit keepCliPackage; };
+in
 {
   name = "keep-node-oprf-unlock-test";
 
-  nodes.relay =
-    { ... }:
-    {
-      # The relay binds 0.0.0.0 by default; the nixpkgs module hardcodes
-      # network = { port = ...; } and discards any settings.network.address via a
-      # shallow `//` merge, so setting it here is inert. The default is already what
-      # the box/holder VMs need to reach it cross-node.
-      services.nostr-rs-relay = {
-        enable = true;
-        port = 7777;
-      };
-      networking.firewall.allowedTCPPorts = [ 7777 ];
-    };
+  nodes.relay = common.relayNode;
+  nodes.box = common.boxNode;
+  nodes.holder = common.holderNode;
 
-  # keep-cli's relay-URL guard rejects single-label hosts as internal (SSRF protection) with no
-  # runtime opt-out, so the box/holder reach the relay by a dotted name that passes validation.
-  # ws:// skips cert-pinning's resolved-IP check, so the private VM address it resolves to is fine.
-  nodes.box =
-    { pkgs, nodes, ... }:
-    {
-      environment.systemPackages = [
-        keepCliPackage
-        pkgs.cryptsetup
-      ];
-      virtualisation.tpm.enable = true; # swtpm -> /dev/tpmrm0
-      # Create the tss group and set /dev/tpmrm0 to tss:0660 (udev), so the non-root confined unlock
-      # (step 5b, keep-node-5y0) can reach the TPM via SupplementaryGroups=tss. Root (the every-boot
-      # path) is unaffected. This is the same requirement a non-root frost-gate scope would carry.
-      security.tpm2.enable = true;
-      networking.firewall.enable = false;
-      networking.extraHosts = "${nodes.relay.networking.primaryIPAddress} relay.kfp";
-    };
-
-  nodes.holder =
-    { nodes, ... }:
-    {
-      environment.systemPackages = [ keepCliPackage ];
-      networking.firewall.enable = false;
-      networking.extraHosts = "${nodes.relay.networking.primaryIPAddress} relay.kfp";
-    };
-
-  testScript = ''
-    import re
-
-    def must_match(pattern, text, what):
-        m = re.search(pattern, text)
-        assert m is not None, f"no {what} in output: {text!r}"
-        return m.group(0)
-
-    keep = "${keepCliPackage}/bin/keep"
-    relay_url = "ws://relay.kfp:7777"
-    # KEEP_YES skips confirmations; --no-mlock avoids RLIMIT_MEMLOCK failures in the
-    # VM; KEEP_ALLOW_WS allows the plain-ws:// test relay (no TLS in the VM).
-    # KEEP_PEER_ANNOUNCE_INTERVAL_SECS shrinks the 20s re-announce cadence so peer discovery
-    # (which polls a bounded window) reliably overlaps an announce in the VM, making the
-    # rendezvous deterministic instead of racing the default cadence.
-    env = "KEEP_PASSWORD=testpassword123 KEEP_YES=1 KEEP_ALLOW_WS=1 KEEP_PEER_ANNOUNCE_INTERVAL_SECS=3"
-
-    def keep_bg(node, unit, args):
-        # Run a long-lived `keep` (serve/announce) as a transient unit in the background.
-        node.succeed(
-            f"systemd-run --unit={unit} "
-            f"--setenv=KEEP_PASSWORD=testpassword123 --setenv=KEEP_YES=1 --setenv=KEEP_ALLOW_WS=1 "
-            f"--setenv=KEEP_PEER_ANNOUNCE_INTERVAL_SECS=3 "
-            f"{keep} --no-mlock {args}"
-        )
-        # Wait until the node is actually serving, not merely until the unit is active:
-        # `keep` unlocks its vault (Argon2) BEFORE it starts the node, which can take tens of
-        # seconds in a loaded VM. The unit goes active immediately, so is-active is a false
-        # readiness signal; the "Listening" banner means the node has subscribed and is
-        # announcing, so the box never provisions/unlocks before this peer can answer. This
-        # also fails fast if the process crashed on startup (a bad flag, unreachable relay).
-        node.wait_until_succeeds(
-            f"journalctl -u {unit}.service --no-pager | grep -q 'Listening for FROST messages'",
-            timeout=180,
-        )
-
+  testScript = common.preamble + ''
     start_all()
     relay.wait_for_unit("nostr-rs-relay.service")
     relay.wait_for_open_port(7777)
@@ -272,8 +203,8 @@
         f"--share-file /root/box-oprf.share "
         f"> /root/neg-unlock.out 2>/root/neg-unlock.err"
     )
-    # ...and it emitted no usable key material: a failed unlock must not leak a 32-byte key.
-    neg_size = box.succeed("stat -c %s /root/neg-unlock.out").strip()
-    assert neg_size != "32", f"below-threshold unlock leaked a 32-byte key ({neg_size} bytes)"
+    # ...and it emitted no usable key material: a failed unlock must leak no key bytes to stdout. The
+    # shared helper strips keep-cli's error-path terminal escape before asserting the remainder is empty.
+    fail_closed(box, "/root/neg-unlock.out")
   '';
 }
