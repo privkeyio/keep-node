@@ -5,7 +5,8 @@ A practical runbook for standing keep-node up on a real machine, tier by tier. W
 x86_64 UEFI mini-PC with a TPM 2.0. The build is **x86_64 only** , an ARM SBC will not work.
 
 Each tier is independent and additive; you can stop at any of them. Do them in order , later tiers
-assume the earlier ones work.
+assume the earlier ones work. The phases below group the work and do not map one-to-one to tiers: Phase
+0 is BIOS prep (no tier), Tier 0 spans Phases 1-2, and Tiers 1-4 are Phases 3-5.
 
 | Tier | Proves | Needs |
 |------|--------|-------|
@@ -55,7 +56,7 @@ That's a hardened node on real metal: key-only SSH, no known password, signups d
 the Vaultwarden web vault before the mesh exists, tunnel it: `ssh -L 8222:localhost:8222
 keepadmin@<node-ip>`, then open `http://localhost:8222`.
 
-## Phase 2 , mesh onboarding (declarative)
+## Phase 2 (Tier 0, cont.) , mesh onboarding (declarative)
 
 From here you leave the stock image and deploy **your own config** (a flake that imports keep-node's
 modules and sets your roster + keys). See [Deployment](./deployment.md) for the full `keepNode.mesh` +
@@ -63,7 +64,9 @@ modules and sets your roster + keys). See [Deployment](./deployment.md) for the 
 
 1. Generate an nvpn identity per participant (each box **and** your laptop) and record each npub.
 2. Author each box's `keepNode.mesh` (networkId, selfEndpoint = its LAN ip:port, peers = the others'
-   npub+endpoint, identityDir) and `keepNode.adminAccess.authorizedKeys`.
+   npub+endpoint, identityDir) and `keepNode.adminAccess.authorizedKeys`. `identityDir` holds that
+   box's mesh secret key , deliver it out-of-band to a runtime path (e.g. `/run/secrets/...`), never a
+   Nix-store path, or the key lands in the world-readable store (the module asserts against this).
 3. Deploy your config to each box , either `nixos-rebuild switch --flake .#<host> --target-host
    keepadmin@<node-ip> --use-remote-sudo`, or a tool like deploy-rs/colmena.
 
@@ -89,10 +92,12 @@ keepNode.frostGate = {
   `ls -l /dev/disk/by-id/`.
 - First boot provisions + formats the volume, seals the LUKS key to the TPM, and mounts it at
   `/var/lib/vaultwarden`. Subsequent boots auto-unlock unattended.
-- **`recoveryKeyFile`** enrolls an extra recovery keyslot and writes the key to that path , move it
-  **offline and delete it**. It is the escape hatch if PCR 7 changes (a firmware/Secure-Boot/board
-  change) before you have a replica to recover from. It deliberately weakens "steal the box, get
-  nothing," so drop it once you have a second node (Tier 4).
+- **`recoveryKeyFile`** enrolls an extra recovery keyslot and writes the key to that path , which sits
+  on the **unencrypted root disk** (only `/var/lib/vaultwarden` is on the sealed volume), so **move it
+  offline and delete the on-disk copy** as soon as first boot writes it. It is the escape hatch if PCR 7
+  changes (a firmware/Secure-Boot/board change, or the Tier-2 switch to measured boot) before you have a
+  replica to recover from. Left in place it defeats "steal the box, get nothing," so keep it only while
+  you are single-node and drop it once you have a second node (Tier 4).
 
 ## Phase 4 (Tier 2) , measured boot (bind the seal to the real boot image)
 
@@ -100,23 +105,47 @@ PCR 7 alone only covers Secure Boot *policy*. Measured boot (Lanzaboote UKI → 
 the actual kernel/initrd/cmdline, so a tampered boot image fails closed. This is a bigger change (it
 replaces the boot stack) and needs your **own Secure Boot keys**.
 
+The seal's PCR set is enrolled **once, at first provision** (Tier 1). Changing `sealPcrs` and
+redeploying does **not** re-seal an existing volume , the gate just keeps unlocking the old,
+PCR-7-bound token (the only `--tpm2-pcrs` enrollment is the first-boot provision path). So plan the
+order deliberately:
+
+- **Fresh box (recommended):** do this phase *before* Tier 1 provisions the vault. Set up the Secure
+  Boot keys and Lanzaboote (steps below), reboot into the UKI with Secure Boot on, and only then attach
+  the vault volume with `sealPcrs = [ 7 11 ]` already set , first provision then seals to PCR 7+11 from
+  the start.
+- **Already-sealed box (Tier 1 done):** enrolling your Secure Boot keys and turning Secure Boot on
+  change PCR 7 itself, so the current PCR-7 seal fails closed on the next boot , this is expected, not a
+  fault. Boot the new stack, unlock the volume with the Tier-1 `recoveryKeyFile`, then re-seal the token
+  to the new PCRs by hand (the gate will not re-enroll for you):
+
+  ```bash
+  # after unlocking with the recovery key, on the box:
+  systemd-cryptenroll --wipe-slot=tpm2 --tpm2-device=auto --tpm2-pcrs=7+11 /dev/disk/by-id/nvme-...
+  ```
+
+Steps (both paths share the key setup):
+
 1. On the box, create the Secure Boot PKI: `sbctl create-keys` (writes `/var/lib/sbctl`).
 2. Enroll your keys into firmware: `sbctl enroll-keys` (with the box in Secure Boot **Setup Mode** ,
    set in BIOS: Security → Secure Boot → clear/erase keys, which drops to Setup Mode). Optionally keep
    Microsoft's keys with `sbctl enroll-keys -m` if any option ROM needs them.
-3. In your config, import Lanzaboote + the measured-boot module and bind the seal to PCR 11:
+3. In your config, import Lanzaboote + the measured-boot module and set the seal PCRs:
 
    ```nix
    imports = [ inputs.lanzaboote.nixosModules.lanzaboote ./nixos/measured-boot.nix ];
    keepNode.measuredBoot.enable = true;            # pkiBundle defaults to /var/lib/sbctl
-   keepNode.frostGate.sealPcrs = [ 7 11 ];         # bind the TPM seal to the measured UKI
+   keepNode.frostGate.sealPcrs = [ 7 11 ];         # first provision seals here; re-enroll by hand if already sealed
    ```
 
 4. Deploy, then enable **Secure Boot** in BIOS. Verify with `sbctl verify` and `bootctl status`.
 
-Order matters: enroll keys and switch to the Lanzaboote UKI **before** adding `11` to `sealPcrs`, or the
-seal binds a zero/garbage PCR 11 and the next boot fails closed. The `recoveryKeyFile` from Tier 1 is
-your way back in if that happens.
+Never add `11` to `sealPcrs` before the box actually boots the Lanzaboote UKI: until then PCR 11 is
+unpopulated, so a seal would bind a zero/garbage value and the next boot fails closed. The module's own
+assertion refuses a `sealPcrs` containing 11 unless `measuredBoot.enable` is set, but enabling the
+module and *booting* the UKI are two different moments , the reboot in step 4 is what populates PCR 11.
+On an already-sealed box the Tier-1 recovery key is your way back in, both for the expected PCR-7 lockout
+above and for any misstep here.
 
 ## Phase 5 (Tiers 3-4) , OPRF quorum + HA
 
