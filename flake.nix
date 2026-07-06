@@ -244,14 +244,34 @@
         ];
       };
 
+      # The image the installer ships: the HARDENED appliance plus bring-up admin SSH. No debug-access,
+      # no known password, signups default-deny. `keepNode.adminAccess.lanBringup` exposes the key-only
+      # SSH on the LAN (a fresh node has no mesh yet) and reads the operator's key from a runtime file
+      # that `install-keepnode --ssh-key` writes at install time (the closure is fixed at ISO-build time,
+      # so the key can't be baked into config). Once the node joins the mesh, redeploy with lanBringup
+      # off for the mesh-only posture. This replaces the old debug-profile installer image.
+      keepnodeBringupSystem = nixpkgs.lib.nixosSystem {
+        inherit system;
+        modules = [
+          ./nixos/keep-node.nix
+          ./nixos/appliance.nix
+          {
+            keepNode.adminAccess = {
+              enable = true;
+              authorizedKeysFile = "/etc/keepnode/admin_authorized_keys";
+              lanBringup = true;
+            };
+          }
+        ];
+      };
+
       # A self-contained UEFI installer ISO. It embeds the full appliance closure (see
-      # installer.nix) so `install-keepnode /dev/DISK` wipes the target and installs offline.
-      # It installs the reachable bring-up image (debug profile) so the hardware-validated flow
-      # holds: USB boot -> install -> reach Vaultwarden over HTTPS on the LAN.
+      # installer.nix) so `install-keepnode /dev/DISK --ssh-key <k>` wipes the target and installs
+      # offline: USB boot -> install (enroll key) -> reach the hardened node over key-only SSH.
       installerSystem = nixpkgs.lib.nixosSystem {
         inherit system;
         specialArgs = {
-          keepnodeToplevel = keepnodeDebugSystem.config.system.build.toplevel;
+          keepnodeToplevel = keepnodeBringupSystem.config.system.build.toplevel;
         };
         modules = [
           (nixpkgs + "/nixos/modules/installer/cd-dvd/installation-cd-minimal.nix")
@@ -346,6 +366,10 @@
             nvpnPackage = nvpn;
             inherit nvpnIdentityFixture adminKeyFixture;
           };
+        };
+        adminaccess-bringup = pkgs.testers.runNixOSTest {
+          imports = [ ./tests/adminaccess-bringup.nix ];
+          _module.args = { inherit adminKeyFixture; };
         };
         mesh-replication = pkgs.testers.runNixOSTest {
           imports = [ ./tests/mesh-replication.nix ];

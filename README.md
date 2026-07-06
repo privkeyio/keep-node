@@ -62,14 +62,20 @@ Build a bootable USB installer and install keep-node on a real UEFI machine.
 3. Boot the target machine from the USB (UEFI; disable Secure Boot if it won't boot, the image isn't Secure-Boot-signed), then install to the internal disk:
 
    ```bash
-   install-keepnode /dev/sda      # the target's internal disk, NOT the USB
+   install-keepnode /dev/sda --ssh-key "ssh-ed25519 AAAA... you@host"   # /dev/sda is the target's internal disk, NOT the USB
    ```
 
-   It auto-elevates, wipes the disk, partitions UEFI, and installs offline. Type `YES` to confirm. When it finishes, remove the USB and reboot.
+   It auto-elevates, wipes the disk, partitions UEFI, installs offline, and enrolls your SSH public key. Type `YES` to confirm. When it finishes, remove the USB and reboot. `--ssh-key` is required (the image has no password, so your key is how you reach the node) and accepts the public key inline as shown, or a file path. The installer's live session is not your laptop, so `~/.ssh/id_ed25519.pub` won't exist there unless you put it there first (paste the key inline, `scp` your `.pub` in, or bring it on a second USB).
 
-4. After first boot, console autologin and SSH are available; default login is `root` / `keepnode`, change it immediately (`passwd`). Find the node's IP with `ip a`, then open the Vaultwarden web vault from the LAN at `https://<node-ip>` (self-signed cert, accept the browser warning; plain HTTP won't work because the web vault needs a secure context).
+4. After first boot, reach the node over **key-only SSH** from a machine on the same LAN (there is no password login):
 
-> **Insecure by design (bring-up only).** The installer image is the `keepnode-debug` profile: it enables an opt-in, test-grade `debugAccess` config (known root password, password SSH, open signups, self-signed TLS) so a fresh box is reachable over the LAN before the encrypted transport lands. For any real deployment, deploy the hardened `nixosConfigurations.keepnode` profile instead (debugAccess off, signups default-deny), where the encrypted mesh forms at boot from your config and admin SSH is key-only and reachable **only over that mesh** (`keepNode.adminAccess`), never the LAN. See [Deployment](docs/deployment.md) for the declarative multi-node + admin-access how-to. `frost-gate` is off in both, so Vaultwarden data sits on the plain disk with no TPM unlock yet.
+   ```bash
+   ssh keepadmin@<node-ip>      # find <node-ip> from your DHCP leases or the node's console
+   ```
+
+   To open the Vaultwarden web vault before the mesh is set up, tunnel it over that SSH session (it binds localhost only): `ssh -L 8222:localhost:8222 keepadmin@<node-ip>`, then browse `http://localhost:8222` (localhost is a secure context, so the web vault loads). Then onboard the node onto the encrypted mesh and redeploy with `keepNode.adminAccess.lanBringup = false` for the mesh-only posture.
+
+> **Hardened by default, reachable by your key.** The installer image is the hardened profile: no known password, key-only SSH (the `keepadmin` account, your enrolled key), `debugAccess` off, Vaultwarden bound to localhost, signups default-deny. During bring-up SSH is reachable on the LAN (`keepNode.adminAccess.lanBringup`) because a fresh node has no mesh yet; once it joins the mesh you redeploy mesh-only. See [Deployment](docs/deployment.md) for the declarative multi-node + admin-access how-to. The legacy `keepnode-debug` profile (known root password, password SSH, open signups) still exists as an explicit opt-in for keyless evaluation, but is never the installed default. `frost-gate` is off, so Vaultwarden data sits on the plain disk with no TPM unlock yet.
 
 ## License
 

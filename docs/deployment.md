@@ -91,12 +91,21 @@ Then, from your (mesh-joined) laptop:
 ssh keepadmin@10.44.x.y     # the node's mesh IP; not reachable from the LAN
 ```
 
-## Bootstrapping note
+## Installer bring-up (generic ISO)
 
 Mesh-only admin assumes your laptop is already a rostered mesh peer. For a co-owned cluster you author
-that in from the start (step 2). Onboarding a box whose operator key isn't known at build time , the
-generic installer ISO enrolling a key at first boot, then flipping to this hardened profile , is
-tracked as follow-up work; until then, that first-reach path is the bring-up debug profile. Physical
-console access is the permanent break-glass.
+that in from the start (step 2). For a box installed from the generic ISO, where the operator key
+isn't known at build time, `install-keepnode --ssh-key <pubkey|file>` enrolls your key at install time
+into a runtime file (`keepNode.adminAccess.authorizedKeysFile`) that the fixed closure reads. The
+installed image is the **hardened** profile (no known password, key-only SSH, `debugAccess` off), with
+`keepNode.adminAccess.lanBringup = true` so the key-only SSH is reachable on the LAN for first contact:
+
+```bash
+install-keepnode /dev/sda --ssh-key ~/.ssh/id_ed25519.pub
+# reboot, then: ssh keepadmin@<node-ip>
+```
+
+Once the node has joined the mesh, redeploy with `lanBringup = false` for the mesh-only posture above.
+Physical console access is the permanent break-glass.
 
 See [Multi-node sync (design)](./multi-node-sync.md) for what replicates over the mesh once it's up.
