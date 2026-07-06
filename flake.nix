@@ -30,6 +30,14 @@
       url = "github:nix-community/lanzaboote/v1.1.0";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+
+    # wisp: the on-box nostr relay (Zig), run bound to the mesh interface. Provides the relay the
+    # threshold-OPRF quorum + (later) relay-based mesh peer discovery coordinate over, dogfooding
+    # privkey's own relay instead of nostr-rs-relay.
+    wisp = {
+      url = "github:privkeyio/wisp";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -40,6 +48,7 @@
       nostr-vpn,
       treefmt-nix,
       lanzaboote,
+      wisp,
     }:
     let
       system = "x86_64-linux";
@@ -370,6 +379,14 @@
         adminaccess-bringup = pkgs.testers.runNixOSTest {
           imports = [ ./tests/adminaccess-bringup.nix ];
           _module.args = { inherit adminKeyFixture; };
+        };
+        wisp-mesh = pkgs.testers.runNixOSTest {
+          imports = [ ./tests/wisp-mesh.nix ];
+          _module.args = {
+            nvpnPackage = nvpn;
+            inherit nvpnIdentityFixture;
+            wispModule = wisp.nixosModules.wisp;
+          };
         };
         mesh-replication = pkgs.testers.runNixOSTest {
           imports = [ ./tests/mesh-replication.nix ];

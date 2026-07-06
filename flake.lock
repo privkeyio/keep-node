@@ -155,7 +155,8 @@
         "lanzaboote": "lanzaboote",
         "nixpkgs": "nixpkgs",
         "nostr-vpn": "nostr-vpn",
-        "treefmt-nix": "treefmt-nix"
+        "treefmt-nix": "treefmt-nix",
+        "wisp": "wisp"
       }
     },
     "rust-overlay": {
@@ -196,6 +197,26 @@
       "original": {
         "owner": "numtide",
         "repo": "treefmt-nix",
+        "type": "github"
+      }
+    },
+    "wisp": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1783363269,
+        "narHash": "sha256-qZjxhUF+RPtxyR1RT1AgOwnFnc7p8Oitk/QFe1t1NCs=",
+        "owner": "privkeyio",
+        "repo": "wisp",
+        "rev": "424e2f02bee187095ce9a4db73bbaaa31708194a",
+        "type": "github"
+      },
+      "original": {
+        "owner": "privkeyio",
+        "repo": "wisp",
         "type": "github"
       }
     }
