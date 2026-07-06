@@ -111,5 +111,11 @@ in
       # Confinement still in effect on the boot-enabled daemon.
       for prop in ["ProtectSystem=strict", "MemoryDenyWriteExecute=yes"]:
           nodeA.succeed(f"systemctl show keep-node-mesh.service | grep -qx '{prop}'")
+
+      # nvpn's PUBLIC bootstrap peers are disabled: this private mesh formed on the operator's own static
+      # endpoints (the ping above) and phones home to nvpn's third-party relays for nothing. That the
+      # mesh is up with bootstrap off proves static endpoints don't need it.
+      for node in [nodeA, nodeB]:
+          node.succeed("grep -qx 'fips_bootstrap_enabled = false' ${stateDir}/.config/nvpn/config.toml")
     '';
 }
