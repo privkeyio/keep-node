@@ -109,5 +109,10 @@ in
 
       # 2. The SAME relay is REFUSED on node A's LAN/underlay address (mesh-only firewall).
       nodeB.fail("${pyClient}/bin/python3 ${probe} ${ipAUnderlay} ${relayPort}")
+
+      # 3. The daemon-level source backstop is wired: the relay port is refused from any non-mesh
+      # source regardless of interface, so meshInterface drift can't expose it. (Parity with the
+      # sshd/rsyncd app-layer ACLs wisp lacks.) Assert the source-CIDR refuse rule is installed.
+      nodeA.succeed("iptables -S nixos-fw | grep -- '--dport ${relayPort}' | grep -q nixos-fw-refuse")
     '';
 }

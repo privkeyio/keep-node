@@ -31,6 +31,17 @@ in
       '';
     };
 
+    meshCidr = lib.mkOption {
+      type = lib.types.str;
+      default = "10.44.0.0/16";
+      description = ''
+        The nvpn mesh subnet. Used for the daemon-level source backstop: the relay port is refused
+        from any source outside this CIDR, independent of the interface, so it holds even if
+        meshInterface drifts. Parity with sshd (AllowUsers @10.44/16) and the rsync receiver
+        (hosts allow = 10.44/16). Matches nvpn's 10.44.x.y assignment.
+      '';
+    };
+
     settings = lib.mkOption {
       type = lib.types.attrsOf lib.types.anything;
       default = { };
@@ -41,12 +52,11 @@ in
   config = lib.mkIf cfg.enable {
     assertions = [
       {
-        # The mesh-only perimeter is enforced by the interface-scoped firewall rule below; if the
-        # firewall is off, that rule does nothing and the relay is reachable on 0.0.0.0 from the
-        # LAN/underlay. firewall.enable is only mkDefault true, so a host can silently turn it off.
-        # Unlike sshd (AllowUsers @10.44/16) and the rsync receiver (hosts allow = 10.44/16), wisp has
-        # NO application-layer source backstop, so this firewall rule is the ONLY perimeter and this
-        # assertion is load-bearing.
+        # The mesh-only perimeter is enforced entirely in the firewall (the interface-scoped rule plus
+        # the source-CIDR backstop below); wisp has no application-layer ACL of its own, so if the
+        # firewall is off BOTH do nothing and the relay is reachable on 0.0.0.0 from the LAN/underlay.
+        # firewall.enable is only mkDefault true, so a host can silently turn it off -- this assertion
+        # is load-bearing.
         assertion = config.networking.firewall.enable;
         message = "keepNode.wisp.enable is true but networking.firewall.enable is false: the mesh-only relay perimeter is the interface-scoped firewall rule, and wisp has no application-layer source restriction behind it. Enable the firewall (or leave wisp off).";
       }
@@ -61,18 +71,33 @@ in
 
     services.wisp = {
       enable = true;
-      # Bind all interfaces at the socket; the mesh-interface firewall rule below is the perimeter (the
-      # mesh IP is runtime-assigned, so binding it directly is not an option). Like the rsync receiver /
-      # sshd, the socket listens broadly and the firewall scopes it to the mesh, but those two ALSO
-      # carry an app-layer source ACL (hosts allow / AllowUsers) that wisp lacks, so here the firewall
-      # rule (assertion-guarded above) is the sole perimeter.
+      # Bind all interfaces at the socket; the firewall scopes it to the mesh (the mesh IP is
+      # runtime-assigned, so binding it directly is not an option). Like the rsync receiver / sshd, the
+      # socket listens broadly and the firewall confines it; the app-layer source ACL those two carry
+      # (hosts allow / AllowUsers), which wisp lacks, is replaced here by the source-CIDR firewall
+      # backstop below (both the interface rule and that backstop are assertion-guarded above).
       host = "0.0.0.0";
       port = cfg.port;
       openFirewall = false; # NOT global; the interface-scoped rule below is the only opening
       settings = cfg.settings;
     };
 
-    # The perimeter is the mesh: open the relay port ONLY on the mesh interface.
+    # The primary perimeter is the mesh: open the relay port ONLY on the mesh interface.
     networking.firewall.interfaces.${cfg.meshInterface}.allowedTCPPorts = [ cfg.port ];
+
+    # Defense-in-depth source backstop, matching the app-layer ACLs the siblings carry (sshd
+    # AllowUsers @meshCidr, rsyncd hosts allow = meshCidr) that wisp cannot (upstream, no native host
+    # ACL). Refuse the relay port from any source outside the mesh CIDR, inserted AHEAD of the
+    # interface accept so it holds even if meshInterface drifts to a LAN iface (the interface rule
+    # would then accept, but the non-mesh source is refused first). Loopback is kept for on-box
+    # clients; IPv6 is refused outright since the mesh is IPv4. Rules with `! -s <cidr>` can't be
+    # combined, so they are inserted in reverse (last insert lands on top).
+    # Ceiling: iptables backend. Under the nftables firewall these no-op; express the same there via
+    # networking.firewall.extraInputRules (`tcp dport <port> ip saddr != <cidr> drop`).
+    networking.firewall.extraCommands = ''
+      iptables  -I nixos-fw -p tcp --dport ${toString cfg.port} ! -s ${cfg.meshCidr} -j nixos-fw-refuse
+      iptables  -I nixos-fw -p tcp --dport ${toString cfg.port} -s 127.0.0.0/8 -j nixos-fw-accept
+      ip6tables -I nixos-fw -p tcp --dport ${toString cfg.port} ! -s ::1/128 -j nixos-fw-refuse
+    '';
   };
 }
