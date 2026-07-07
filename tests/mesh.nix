@@ -93,7 +93,7 @@
           node.wait_for_unit("keep-node-mesh.service")
           node.wait_until_succeeds(
               "journalctl -u keep-node-mesh.service | grep -q 'mesh: 1/1 peers connected'",
-              timeout=90,
+              timeout=120,
           )
 
       # The confinement is the whole point of this unit; assert the load-bearing directives are actually

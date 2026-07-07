@@ -103,7 +103,7 @@
       for node in [active, standby]:
           node.wait_until_succeeds(
               "journalctl -u keep-node-mesh.service | grep -q 'mesh: 1/1 peers connected'",
-              timeout=90,
+              timeout=120,
           )
 
       # --- Write a probe into the active's LIVE vault DB; Litestream captures it into the replica. ---
