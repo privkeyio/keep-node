@@ -328,11 +328,17 @@
         };
         oprf-unlock = pkgs.testers.runNixOSTest {
           imports = [ ./tests/oprf-unlock.nix ];
-          _module.args.keepCliPackage = keep-cli;
+          _module.args = {
+            keepCliPackage = keep-cli;
+            wispModule = wisp.nixosModules.wisp;
+          };
         };
         oprf-unlock-2of3 = pkgs.testers.runNixOSTest {
           imports = [ ./tests/oprf-unlock-2of3.nix ];
-          _module.args.keepCliPackage = keep-cli;
+          _module.args = {
+            keepCliPackage = keep-cli;
+            wispModule = wisp.nixosModules.wisp;
+          };
         };
         measured-boot = pkgs.testers.runNixOSTest {
           imports = [ ./tests/measured-boot.nix ];

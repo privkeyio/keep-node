@@ -4,19 +4,25 @@
 # the parts that must stay in lockstep: the node module fragments and the Python testScript preamble
 # (must_match / keep_bg / fail_closed / env). Each fixture imports this, wires the nodes, and appends its
 # own body.
-{ keepCliPackage }:
 {
-  # The relay binds 0.0.0.0 by default; the nixpkgs module hardcodes network.port and discards
-  # settings.network.address via a shallow `//` merge, so the default is already what the box/holder
-  # VMs reach cross-node.
+  keepCliPackage,
+  wispModule,
+}:
+{
+  # wisp (privkey's own Nostr relay) dogfooded as the OPRF coordination relay (GH #11), replacing the
+  # nostr-rs-relay expedience stand-in. Binds 0.0.0.0 so the box/holder VMs reach it cross-node, opened
+  # on 7777. This is the relay the appliance should actually ship, and the path to testing the
+  # security-meaningful authenticated/rate-limited unlock relay the frost-gate requires.
   relayNode =
     { ... }:
     {
-      services.nostr-rs-relay = {
+      imports = [ wispModule ];
+      services.wisp = {
         enable = true;
+        host = "0.0.0.0";
         port = 7777;
+        openFirewall = true;
       };
-      networking.firewall.allowedTCPPorts = [ 7777 ];
     };
 
   # keep-cli's relay-URL guard rejects single-label hosts as internal (SSRF protection) with no runtime

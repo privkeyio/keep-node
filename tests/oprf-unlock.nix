@@ -18,9 +18,9 @@
 # (that is keep-27yn / Lanzaboote).
 #
 # Run: nix build .#checks.x86_64-linux.oprf-unlock
-{ keepCliPackage, ... }:
+{ keepCliPackage, wispModule, ... }:
 let
-  common = import ./lib/oprf-common.nix { inherit keepCliPackage; };
+  common = import ./lib/oprf-common.nix { inherit keepCliPackage wispModule; };
 in
 {
   name = "keep-node-oprf-unlock-test";
@@ -31,7 +31,7 @@ in
 
   testScript = common.preamble + ''
     start_all()
-    relay.wait_for_unit("nostr-rs-relay.service")
+    relay.wait_for_unit("wisp.service")
     relay.wait_for_open_port(7777)
     box.wait_for_unit("multi-user.target")
     holder.wait_for_unit("multi-user.target")
