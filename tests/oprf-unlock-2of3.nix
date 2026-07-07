@@ -138,11 +138,13 @@ in
         import time
 
         status = 1
-        for _ in range(12):
-            status, _ = box.execute(f"{env} {keep} --no-mlock --path /root/box {oprf_unlock_args} > {dst}")
+        attempts = 12
+        for attempt in range(attempts):
+            status, _ = box.execute(f"{env} timeout 30 {keep} --no-mlock --path /root/box {oprf_unlock_args} > {dst}")
             if status == 0:
                 return box.succeed(f"od -An -v -tx1 {dst} | tr -d ' \\n'").strip()
-            time.sleep(10)
+            if attempt < attempts - 1:
+                time.sleep(10)
         raise Exception(f"oprf-unlock did not converge within the retry budget (last exit {status})")
 
     # --- Leg A: box + holder (holder2 down) reconstructs the provisioned key. ---
