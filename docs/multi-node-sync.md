@@ -31,8 +31,9 @@
 > `keep-node-vault-lag-check` on the standby fails once the received heartbeat is older than the
 > threshold, so an idle-but-in-sync standby reads healthy while a stalled/partitioned one is surfaced.
 > Still to come for M1: moving the quorum to **2-of-3** and Keep-state-over-`wisp` replication.
-> (Internet NAT traversal for the mesh, via nvpn's Nostr discovery + the bundled `wisp` relay, is a
-> deployment concern beyond the VM.)
+> (Relay-based peer discovery over `wisp` is implemented as the opt-in `keepNode.mesh.discovery` mode
+> and tested (`mesh-discovery`); full symmetric-NAT traversal for internet deployment is the remaining
+> piece beyond the VM.)
 > This chapter inventories Vaultwarden's state and the constraints that design has to respect.
 
 Vaultwarden (1.36.x here) keeps its state under one data directory, the FROST-gated LUKS

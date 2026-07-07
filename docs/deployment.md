@@ -42,8 +42,10 @@ runtime path , **never** as a Nix-path literal, or the secret key lands in the w
 
 ## 2. Author each node's mesh roster
 
-The mesh uses **static endpoints** (no relay discovery): each node lists its own advertised endpoint
-and every peer's npub + endpoint. Set the same `networkId` on all of them.
+This how-to uses **static endpoints**: each node lists its own advertised endpoint and every peer's
+npub + endpoint. Set the same `networkId` on all of them. (An opt-in `keepNode.mesh.discovery` mode
+instead learns peer endpoints over a wisp relay , the `mesh-discovery` test proves it , for nodes with
+dynamic addresses; static endpoints are the simplest to start with.)
 
 ```nix
 # node A's configuration.nix (node B is symmetric, with A in its peers)
