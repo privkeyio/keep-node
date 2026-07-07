@@ -2,10 +2,10 @@
 # the vault-replication receiver, admin SSH) each open their port ONLY on this interface, so they must
 # all agree on nvpn's runtime tun device or a service silently opens the wrong (or no) interface.
 # Declaring it once here -- imported by each of those modules -- means an operator sets it in one place
-# and every service inherits it, instead of three per-module options that can drift apart. This is a
-# thin, options-only module (no config), so a module can import it without pulling in the mesh daemon,
-# keeping admin-access.nix usable standalone (its bring-up firewall tests import it without mesh.nix).
-{ lib, ... }:
+# and every service inherits it, instead of three per-module options that can drift apart. It carries
+# only the option and a non-empty assertion (no service config, no mesh daemon), so a module can import
+# it standalone -- e.g. admin-access.nix and its bring-up firewall tests import it without mesh.nix.
+{ lib, config, ... }:
 {
   options.keepNode.mesh.interface = lib.mkOption {
     type = lib.types.str;
@@ -18,4 +18,14 @@
       to it, so they cannot drift apart unless deliberately overridden.
     '';
   };
+
+  # An empty or whitespace-only name scopes every mesh service's firewall port to interface "" at once,
+  # which can fail the firewall apply and fall open to the LAN/underlay. Consolidation turns one typo
+  # into a three-service mis-scope, so refuse it here (mirrors the lanBringupInterface guard).
+  config.assertions = [
+    {
+      assertion = lib.strings.trim config.keepNode.mesh.interface != "";
+      message = "keepNode.mesh.interface must be a non-empty interface name: it scopes the wisp, admin-SSH, and vault-replication firewall ports, and an empty value mis-scopes all three at once.";
+    }
+  ];
 }
