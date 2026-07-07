@@ -370,6 +370,9 @@
           imports = [ ./tests/single-node.nix ];
           _module.args.keepWebPackage = keep-web;
         };
+        vw-client-check = pkgs.testers.runNixOSTest {
+          imports = [ ./tests/vw-client-check.nix ];
+        };
         frost-gate = pkgs.testers.runNixOSTest {
           imports = [ ./tests/frost-gate.nix ];
         };
