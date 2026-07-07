@@ -1,5 +1,7 @@
-# End-to-end frost-gate OPRF mode with the REAL keep binary: the gate itself provisions the vault
-# and then, at boot, unlocks it by running `keep oprf-unlock` inside its confined systemd-run scope.
+# End-to-end frost-gate OPRF mode with the REAL keep binary, and the M0 done-criterion: the gate
+# itself provisions the vault and then, at boot, unlocks it by running `keep oprf-unlock` inside its
+# confined systemd-run scope; then the vault is exercised (register + store + read a password over
+# Vaultwarden's real protocol) and shown to survive a second quorum-unlock reboot.
 # The oprf-unlock test drives keep directly; this drives it THROUGH the frost-gate module (its
 # provision unit + boot gate + confined scope), which is what a real deployment runs and the only
 # place the wlc confinement + the keep-node-5y0 non-root scope are actually exercised with real keep.
@@ -13,8 +15,14 @@
 {
   keepCliPackage,
   frostGroupFixture,
+  pkgs,
   ...
 }:
+let
+  # Headless Bitwarden client for the M0 vault round-trip (crypto validated by the vw-client-check
+  # test): register an account, store a login, read it back -- no browser, no bw/rbw agent.
+  vwClient = import ./lib/vw-client.nix { inherit pkgs; };
+in
 {
   name = "keep-node-oprf-gate-test";
 
@@ -65,6 +73,10 @@
       # A non-root gate scope (keep-node-5y0) needs the tss group + /dev/tpmrm0 at tss:0660.
       security.tpm2.enable = true;
 
+      # M0: allow the vault round-trip's register call. Test-only; a real deploy keeps signups
+      # default-deny (the operator onboards, not open self-registration).
+      keepNode.vaultwarden.signupsAllowed = true;
+
       # Test-only: the VM relay is ws:// (no TLS), which keep's SSRF guard rejects unless
       # KEEP_ALLOW_WS is set. Real deploys use wss://. The provision unit runs keep directly (unit
       # env suffices); the boot gate runs keep in a systemd-run scope that forwards KEEP_ALLOW_WS
@@ -94,6 +106,7 @@
 
   testScript = ''
     keep = "${keepCliPackage}/bin/keep"
+    vw = "${vwClient}"
     relay_url = "ws://relay.kfp:7777"
     npub = "${builtins.readFile "${frostGroupFixture}/npub"}"
     # fixturepass123 is the password the fixture DBs (and thus keepPasswordEnvFile) were built with.
@@ -194,5 +207,28 @@
     # Also assert the tmpfiles chown the scope depends on landed, so a regression that drops it -- and
     # would otherwise make the DB unreadable to the non-root scope -- fails here with a clear signal.
     box.succeed("stat -c %U /var/lib/keep-box | grep -qx keep-oprf-unlock")
+
+    # --- M0 done-criterion: the vault is usable AND its data survives a quorum-unlock cycle. ---
+    # Onboard (register, no seed) + store a password on the now-unlocked Vaultwarden, then reboot --
+    # a SECOND quorum unlock -- and read it back. A read that matches proves the gated volume holds
+    # real, usable Vaultwarden state that persists across the seal/unlock cycle, not just that the
+    # service starts. The store/read run over Vaultwarden's actual Bitwarden protocol (vw-client.py).
+    box.wait_for_open_port(8222)
+    base = "http://localhost:8222"
+    email = "m0@keep.test"
+    pw = "MasterPass123"
+    box.succeed(f"VW_PASSWORD={pw} {vw} register {base} {email} m0user")
+    box.succeed(f"VW_PASSWORD={pw} VW_VALUE=SecretValue123 {vw} store {base} {email} mysecret")
+
+    box.shutdown()
+    box.start()
+    box.wait_for_file("/dev/tpmrm0")
+    box.wait_for_unit("keep-node-frost-gate.service")
+    box.succeed("findmnt -n -o SOURCE /var/lib/vaultwarden | grep -q '/dev/mapper/keep-vault'")
+    box.wait_for_unit("vaultwarden.service")
+    box.wait_for_open_port(8222)
+
+    got = box.succeed(f"VW_PASSWORD={pw} {vw} read {base} {email} mysecret").strip()
+    assert got == "SecretValue123", f"vault read back {got!r} after quorum unlock, expected SecretValue123"
   '';
 }
