@@ -128,13 +128,22 @@ in
     )
 
     def unlock_key(dst):
-        # Read-only reconstruction. Exactly one holder is online per leg, but the offline holder's
-        # announce lingers on the relay, so the box may still sample the absent one; the retry (not a
-        # deterministic sample) is what converges on the online holder that actually answers.
-        box.wait_until_succeeds(
-            f"{env} {keep} --no-mlock --path /root/box {oprf_unlock_args} > {dst}", timeout=120
-        )
-        return box.succeed(f"od -An -v -tx1 {dst} | tr -d ' \\n'").strip()
+        # Read-only reconstruction. Exactly one holder is online per leg, but the just-stopped holder's
+        # announce can still be sampled, so an attempt may pick the absent one and fail; the retry
+        # converges on the online holder that actually answers. keep's oracle rate-limits a requester to
+        # 8 OPRF evals per 60s (MAX_OPRF_EVALS_PER_WINDOW), so a tight wait_until_succeeds loop can
+        # exhaust that budget against the online holder before it converges, after which the unlock can
+        # never succeed (flake). Space the retries >= 10s so the eval rate stays under 8/60s no matter
+        # how many attempts miss, while still giving ~12 attempts to converge.
+        import time
+
+        status = 1
+        for _ in range(12):
+            status, _ = box.execute(f"{env} {keep} --no-mlock --path /root/box {oprf_unlock_args} > {dst}")
+            if status == 0:
+                return box.succeed(f"od -An -v -tx1 {dst} | tr -d ' \\n'").strip()
+            time.sleep(10)
+        raise Exception(f"oprf-unlock did not converge within the retry budget (last exit {status})")
 
     # --- Leg A: box + holder (holder2 down) reconstructs the provisioned key. ---
     serve(holder, "holder-serve2")
