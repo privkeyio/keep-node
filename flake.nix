@@ -312,8 +312,13 @@
           }).config.system.build.toplevel.drvPath;
       adminAccessAntiLockoutHolds =
         # A real key builds (control); empty or whitespace-only keys with no runtime file are rejected
-        # (the lockout guard fires, including through the `trim` so "  " is not mistaken for a key); the
-        # installer's authorizedKeysFile escape still satisfies it (that path is populated at install).
+        # (the lockout guard fires, including through the `trim` so "  " is not mistaken for a key); a
+        # real key alongside blank entries still builds (the guard must not over-reject a list that has
+        # one usable key); the installer's authorizedKeysFile escape satisfies it (path populated at
+        # install). The negative cases assert only `.success == false`, not which assertion fired: tryEval
+        # surfaces no message. That is attributable to the anti-lockout guard only because every fixture
+        # holds the module's other assertions passing (firewall on, no debugAccess, lanBringupInterface
+        # null), so the sole eval difference from the control is `authorizedKeys`.
         (adminAccessToplevelEvals {
           authorizedKeys = [ "ssh-ed25519 AAAAeval-only-fixture-key keepadmin-eval" ];
         }).success
@@ -322,6 +327,12 @@
           authorizedKeys = [
             ""
             "   "
+          ];
+        }).success
+        && (adminAccessToplevelEvals {
+          authorizedKeys = [
+            ""
+            "ssh-ed25519 AAAAeval-only-fixture-key keepadmin-eval"
           ];
         }).success
         && (adminAccessToplevelEvals {
