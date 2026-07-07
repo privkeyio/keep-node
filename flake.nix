@@ -551,6 +551,29 @@
           imports = [ ./tests/adminaccess-bringup.nix ];
           _module.args = { inherit adminKeyFixture; };
         };
+        installer-guards = pkgs.testers.runNixOSTest {
+          imports = [ ./tests/installer-guards.nix ];
+          _module.args = {
+            inherit adminKeyFixture;
+            # install-keepnode's guards abort before the install, so the embedded closure is never
+            # installed (it is still built into the test VM's store) -- a minimal stand-in keeps the
+            # test build light instead of the full appliance.
+            keepnodeToplevel =
+              (nixpkgs.lib.nixosSystem {
+                inherit system;
+                modules = [
+                  {
+                    boot.loader.grub.enable = false;
+                    fileSystems."/" = {
+                      device = "/dev/vda";
+                      fsType = "ext4";
+                    };
+                    system.stateVersion = "24.11";
+                  }
+                ];
+              }).config.system.build.toplevel;
+          };
+        };
         wisp-mesh = pkgs.testers.runNixOSTest {
           imports = [ ./tests/wisp-mesh.nix ];
           _module.args = {
