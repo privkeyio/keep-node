@@ -109,5 +109,12 @@ in
 
       # 2. The SAME relay is REFUSED on node A's LAN/underlay address (mesh-only firewall).
       nodeB.fail("${pyClient}/bin/python3 ${probe} ${ipAUnderlay} ${relayPort}")
+
+      # 3. The firewall source backstop: the relay port is refused from any out-of-CIDR source
+      # regardless of interface (so meshInterface drift to a LAN iface can't expose it), while on-box
+      # clients still reach it via the loopback accept inserted ahead of the refuse. Assert the refuse
+      # rule is installed, and probe over loopback to prove the accept sits ahead of it.
+      nodeA.succeed("iptables -S nixos-fw | grep -- '--dport ${relayPort}' | grep -q nixos-fw-refuse")
+      nodeA.succeed("${pyClient}/bin/python3 ${probe} 127.0.0.1 ${relayPort}")
     '';
 }
