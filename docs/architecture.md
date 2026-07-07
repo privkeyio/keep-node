@@ -18,6 +18,8 @@ appliance is assembled from a few NixOS modules under `nixos/`, wired together b
   attachment/Send file replication, a replication-lag health signal, and crash-then-promote failover.
 - `mesh.nix`, the encrypted node-to-node transport (nostr-vpn's `nvpn`, boringtun userspace
   WireGuard) that replication rides between nodes.
+- `wisp.nix`, the opt-in on-box Nostr relay (`keepNode.wisp`), bound to the mesh interface, that the
+  threshold-OPRF quorum and (opt-in) relay-based peer discovery coordinate over.
 - `measured-boot.nix`, opt-in Lanzaboote UKI boot so the seal binds a real measured-boot PCR.
 - `ingress.nix`, an opt-in TLS reverse proxy with brute-force protection for direct HTTPS access.
 
@@ -103,9 +105,15 @@ distinct from the signing sessions, described in the next chapter.
 
 ### The relay (wisp)
 
-Nostr coordination (FROST, the bunker, the unlock session, peer discovery) needs a relay.
-The design bundles `wisp`, a lightweight Nostr relay, so a deployment does not depend on
-third-party public relays. The relay is untrusted infrastructure: it stores and forwards
+Nostr coordination (FROST, the bunker, the unlock session, peer discovery) needs a relay. Keep Node
+bundles `wisp`, privkey's own lightweight Nostr relay, so a deployment does not depend on third-party
+public relays. It is the relay the threshold-OPRF quorum actually coordinates over: the `oprf-unlock`
+tests run the real `keep` quorum against wisp (dogfooding it in place of a stand-in relay), including
+with **NIP-42 authentication required** , `keep` authenticates automatically and an unauthenticated
+client is refused. Run on-box via the opt-in `keepNode.wisp` module, it binds to the mesh interface
+only, so it is reachable over the encrypted mesh and refused on the LAN/underlay.
+
+The relay is untrusted infrastructure: it stores and forwards
 ciphertext only, never plaintext, and holds at most one key share, below the quorum
 threshold, so a compromised relay still cannot decrypt or sign.
 
@@ -131,8 +139,11 @@ The `mesh-replication` test drives this end to end , replicate, propagate a dele
 active, promote the standby , over a real mesh with no relay. Replicas only ever exchange the
 application state above the LUKS layer, re-encrypted under each node's own volume, never plaintext or
 a quorum-threshold set of shares, and the mesh authenticates peers (npub roster) and encrypts the
-hop (WireGuard). Internet NAT traversal for the mesh (nvpn's Nostr discovery + the bundled relay)
-is a deployment concern beyond the VM.
+hop (WireGuard). Relay-based peer discovery , nodes learning each other's endpoints over a wisp relay
+instead of static config , is implemented as the opt-in `keepNode.mesh.discovery` mode and proven in
+the `mesh-discovery` test (two nodes form the mesh with no static endpoints). Full symmetric-NAT
+traversal (hole-punching over the relay's ephemeral channel) is the remaining internet-deployment
+piece beyond the VM.
 
 ## Boot flow
 
