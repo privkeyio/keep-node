@@ -87,6 +87,8 @@ let
   '';
 in
 {
+  imports = [ ./mesh-interface.nix ];
+
   options.keepNode.vaultReplication = {
     rsaKeyFile = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
@@ -161,10 +163,12 @@ in
       };
       meshInterface = lib.mkOption {
         type = lib.types.str;
-        default = "utun100";
+        default = config.keepNode.mesh.interface;
+        defaultText = lib.literalExpression "config.keepNode.mesh.interface";
         description = ''
           The nvpn mesh interface. The receiver's port is opened only here, so only rostered mesh
-          peers (not the LAN or the underlay) can reach it. Matches nvpn's tunnel device name.
+          peers (not the LAN or the underlay) can reach it. Defaults to the shared
+          `keepNode.mesh.interface` so it can't drift from nvpn's tunnel device.
         '';
       };
       maxLagSeconds = lib.mkOption {

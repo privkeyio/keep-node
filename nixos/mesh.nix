@@ -39,6 +39,8 @@ let
   baseSetArgs = "--network-id ${lib.escapeShellArg cfg.networkId} --listen-port ${toString cfg.listenPort} --fips-advertise-endpoint true --endpoint ${lib.escapeShellArg cfg.selfEndpoint}";
 in
 {
+  imports = [ ./mesh-interface.nix ];
+
   options.keepNode.mesh = {
     enable = lib.mkEnableOption "nvpn encrypted mesh transport (nostr-vpn)";
 

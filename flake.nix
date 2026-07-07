@@ -340,6 +340,35 @@
           authorizedKeysFile = "/run/keys/admin_authorized_keys";
         }).success;
 
+      # Pure-eval guard for the mesh-interface single source of truth: setting keepNode.mesh.interface
+      # once must propagate to every mesh-scoped service's meshInterface, so they cannot drift apart.
+      # A refactor that reverts one service to a hardcoded default flips this red.
+      meshInterfaceInheritance =
+        let
+          c =
+            (nixpkgs.lib.nixosSystem {
+              inherit system;
+              modules = [
+                wisp.nixosModules.wisp # wisp.nix references services.wisp (upstream module)
+                ./nixos/mesh.nix
+                ./nixos/wisp.nix
+                ./nixos/admin-access.nix
+                ./nixos/vault-replication.nix
+                {
+                  fileSystems."/" = {
+                    device = "/dev/disk/by-label/root";
+                    fsType = "ext4";
+                  };
+                  boot.loader.grub.enable = false;
+                  keepNode.mesh.interface = "utun-consolidation-probe";
+                }
+              ];
+            }).config;
+        in
+        c.keepNode.wisp.meshInterface == "utun-consolidation-probe"
+        && c.keepNode.adminAccess.meshInterface == "utun-consolidation-probe"
+        && c.keepNode.vaultReplication.meshReplication.meshInterface == "utun-consolidation-probe";
+
       # The hardened appliance, as it lands on real hardware: UEFI, Vaultwarden on, keep-web and
       # frost-gate off (frost-gate TPM unlock is opt-in and added later). debug-access is NOT
       # included and Vaultwarden signups default-deny, so this is the secure default profile.
@@ -486,6 +515,12 @@
             "touch $out"
           else
             "echo 'adminAccess anti-lockout regression: the module either built with no usable key (empty or whitespace-only authorizedKeys and no authorizedKeysFile, a permanent key-only-SSH remote lockout) or refused a valid config (a real inline key, or the installer authorizedKeysFile escape)' >&2; exit 1"
+        );
+        mesh-interface-consolidation = pkgs.runCommand "mesh-interface-consolidation" { } (
+          if meshInterfaceInheritance then
+            "touch $out"
+          else
+            "echo 'mesh interface consolidation regression: keepNode.mesh.interface did not propagate to one of keepNode.{wisp,adminAccess,vaultReplication.meshReplication}.meshInterface (a service reverted to a hardcoded default and can drift from nvpn device)' >&2; exit 1"
         );
         ha-failover = pkgs.testers.runNixOSTest {
           imports = [ ./tests/ha-failover.nix ];
