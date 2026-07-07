@@ -18,9 +18,14 @@
 # (that is keep-27yn / Lanzaboote).
 #
 # Run: nix build .#checks.x86_64-linux.oprf-unlock
-{ keepCliPackage, ... }:
+{
+  keepCliPackage,
+  wispModule,
+  pkgs,
+  ...
+}:
 let
-  common = import ./lib/oprf-common.nix { inherit keepCliPackage; };
+  common = import ./lib/oprf-common.nix { inherit keepCliPackage wispModule pkgs; };
 in
 {
   name = "keep-node-oprf-unlock-test";
@@ -31,8 +36,10 @@ in
 
   testScript = common.preamble + ''
     start_all()
-    relay.wait_for_unit("nostr-rs-relay.service")
+    relay.wait_for_unit("wisp.service")
     relay.wait_for_open_port(7777)
+    # The relay requires NIP-42 auth; prove it refuses unauthenticated clients before the quorum runs.
+    assert_auth_enforced(relay)
     box.wait_for_unit("multi-user.target")
     holder.wait_for_unit("multi-user.target")
     box.wait_for_file("/dev/tpmrm0")

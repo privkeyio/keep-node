@@ -4,19 +4,68 @@
 # the parts that must stay in lockstep: the node module fragments and the Python testScript preamble
 # (must_match / keep_bg / fail_closed / env). Each fixture imports this, wires the nodes, and appends its
 # own body.
-{ keepCliPackage }:
 {
-  # The relay binds 0.0.0.0 by default; the nixpkgs module hardcodes network.port and discards
-  # settings.network.address via a shallow `//` merge, so the default is already what the box/holder
-  # VMs reach cross-node.
+  keepCliPackage,
+  wispModule,
+  pkgs,
+}:
+let
+  # Asserts the relay enforces NIP-42 auth: an unauthenticated REQ must be answered with a CLOSED
+  # "auth-required" frame, never with events. Without this check a passing quorum could not distinguish an
+  # authenticated client from auth being disabled on the relay.
+  pyClient = pkgs.python3.withPackages (ps: [ ps.websockets ]);
+  authProbe = pkgs.writeText "wisp-auth-probe.py" ''
+    import asyncio, json, sys, websockets
+
+    async def main():
+        async with websockets.connect("ws://127.0.0.1:7777") as ws:
+            await ws.send(json.dumps(["REQ", "unauth", {"kinds": [1], "limit": 1}]))
+            for _ in range(6):
+                try:
+                    msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+                except asyncio.TimeoutError:
+                    sys.exit("relay never answered the unauthenticated REQ (auth withheld without a CLOSED frame?)")
+                verb = msg[0]
+                if verb == "CLOSED" and len(msg) > 2 and "auth-required" in msg[2]:
+                    print("auth enforced:", msg[2])
+                    return
+                if verb == "EVENT":
+                    sys.exit(f"LEAK: relay served an EVENT to an unauthenticated client: {msg}")
+                if verb == "EOSE":
+                    sys.exit(f"NOT ENFORCED: relay sent EOSE (served) without auth: {msg}")
+                # AUTH challenge / NOTICE: keep reading
+            sys.exit("no auth-required rejection observed")
+
+    asyncio.run(main())
+  '';
+in
+{
+  # Wisp Nostr relay serving as the OPRF coordination relay. Binds 0.0.0.0 on 7777 so the box and holder
+  # VMs reach it cross-node. auth.required enforces NIP-42, which keep satisfies automatically via
+  # nostr-sdk. rate_limits are deliberately high so relay throttling never interferes with the OPRF
+  # coordination (3s re-announce plus FROST rounds): the relay's per-minute limit is DoS hygiene, NOT the
+  # key-leak throttle. The security-critical throttle -- capping OPRF evaluations per requester so a fixed
+  # low-entropy input can't be replayed to reconstruct the key -- lives in keep's oracle
+  # (--oprf-auto-approve) and is exercised by the holder legs. Exercising the relay's own per-minute
+  # throttle is wisp-side coverage, tracked as keep-node-h3o; what this fixture proves at the relay is
+  # auth enforcement (assert_auth_enforced).
   relayNode =
     { ... }:
     {
-      services.nostr-rs-relay = {
+      imports = [ wispModule ];
+      services.wisp = {
         enable = true;
+        host = "0.0.0.0";
         port = 7777;
+        openFirewall = true;
+        settings = {
+          auth.required = true;
+          rate_limits = {
+            events_per_minute = 100000;
+            queries_per_minute = 100000;
+          };
+        };
       };
-      networking.firewall.allowedTCPPorts = [ 7777 ];
     };
 
   # keep-cli's relay-URL guard rejects single-label hosts as internal (SSRF protection) with no runtime
@@ -60,6 +109,11 @@
         m = re.search(pattern, text)
         assert m is not None, f"no {what} in output: {text!r}"
         return m.group(0)
+
+    def assert_auth_enforced(node):
+        # Assert the relay rejects unauthenticated clients (NIP-42), so a passing quorum below confirms
+        # keep authenticated rather than auth being disabled.
+        node.succeed("${pyClient}/bin/python3 ${authProbe}")
 
     keep = "${keepCliPackage}/bin/keep"
     relay_url = "ws://relay.kfp:7777"
