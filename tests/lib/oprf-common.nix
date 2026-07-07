@@ -7,12 +7,41 @@
 {
   keepCliPackage,
   wispModule,
+  pkgs,
 }:
+let
+  # Proves the relay actually ENFORCES auth: an unauthenticated REQ must be refused with
+  # "auth-required" (handler.zig sends ["CLOSED", sub, "auth-required: ..."]), never served events. So a
+  # green quorum over this relay MEANS keep authenticated (NIP-42), not that auth was silently off.
+  pyClient = pkgs.python3.withPackages (ps: [ ps.websockets ]);
+  authProbe = pkgs.writeText "wisp-auth-probe.py" ''
+    import asyncio, json, sys, websockets
+
+    async def main():
+        async with websockets.connect("ws://127.0.0.1:7777") as ws:
+            await ws.send(json.dumps(["REQ", "unauth", {"kinds": [1], "limit": 1}]))
+            for _ in range(6):
+                msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+                verb = msg[0]
+                if verb == "CLOSED" and len(msg) > 2 and "auth-required" in msg[2]:
+                    print("auth enforced:", msg[2])
+                    return
+                if verb == "EVENT":
+                    sys.exit(f"LEAK: relay served an EVENT to an unauthenticated client: {msg}")
+                if verb == "EOSE":
+                    sys.exit(f"NOT ENFORCED: relay sent EOSE (served) without auth: {msg}")
+                # AUTH challenge / NOTICE: keep reading
+            sys.exit("no auth-required rejection observed")
+
+    asyncio.run(main())
+  '';
+in
 {
   # wisp (privkey's own Nostr relay) dogfooded as the OPRF coordination relay (GH #11), replacing the
   # nostr-rs-relay expedience stand-in. Binds 0.0.0.0 so the box/holder VMs reach it cross-node, opened
-  # on 7777. This is the relay the appliance should actually ship, and the path to testing the
-  # security-meaningful authenticated/rate-limited unlock relay the frost-gate requires.
+  # on 7777. auth.required exercises the authenticated unlock path (keep auto-authenticates via
+  # nostr-sdk); rate_limits are set generous so throttling never interferes with the OPRF coordination
+  # (which re-announces every 3s + runs FROST rounds) -- the security value here is auth, not throttling.
   relayNode =
     { ... }:
     {
@@ -22,6 +51,13 @@
         host = "0.0.0.0";
         port = 7777;
         openFirewall = true;
+        settings = {
+          auth.required = true;
+          rate_limits = {
+            events_per_minute = 100000;
+            queries_per_minute = 100000;
+          };
+        };
       };
     };
 
@@ -66,6 +102,11 @@
         m = re.search(pattern, text)
         assert m is not None, f"no {what} in output: {text!r}"
         return m.group(0)
+
+    def assert_auth_enforced(node):
+        # Prove the relay refuses an UNauthenticated client (NIP-42 auth_required), so the quorum that
+        # forms below over this relay means keep authenticated -- not that auth was a no-op.
+        node.succeed("${pyClient}/bin/python3 ${authProbe}")
 
     keep = "${keepCliPackage}/bin/keep"
     relay_url = "ws://relay.kfp:7777"
