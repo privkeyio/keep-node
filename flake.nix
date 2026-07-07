@@ -282,6 +282,53 @@
         && !(builtins.elem 22 off.allowedTCPPorts)
         && !(builtins.elem 22 (off.interfaces.eth0.allowedTCPPorts or [ ]));
 
+      # Pure-eval guard for the adminAccess anti-lockout assertion: key-only SSH with no authorized
+      # key (and no runtime keys file) is a permanent remote lockout, so the module must refuse to
+      # build. Forcing the system toplevel triggers assertions; tryEval turns a fired assertion into
+      # success=false. Catches a refactor that drops or weakens the guard, without booting a VM.
+      adminAccessToplevelEvals =
+        {
+          authorizedKeys,
+          authorizedKeysFile ? null,
+        }:
+        builtins.tryEval
+          (nixpkgs.lib.nixosSystem {
+            inherit system;
+            modules = [
+              ./nixos/admin-access.nix
+              {
+                fileSystems."/" = {
+                  device = "/dev/disk/by-label/root";
+                  fsType = "ext4";
+                };
+                boot.loader.grub.enable = false;
+                networking.firewall.enable = true;
+                keepNode.adminAccess = {
+                  enable = true;
+                  inherit authorizedKeys authorizedKeysFile;
+                };
+              }
+            ];
+          }).config.system.build.toplevel.drvPath;
+      adminAccessAntiLockoutHolds =
+        # A real key builds (control); empty or whitespace-only keys with no runtime file are rejected
+        # (the lockout guard fires, including through the `trim` so "  " is not mistaken for a key); the
+        # installer's authorizedKeysFile escape still satisfies it (that path is populated at install).
+        (adminAccessToplevelEvals {
+          authorizedKeys = [ "ssh-ed25519 AAAAeval-only-fixture-key keepadmin-eval" ];
+        }).success
+        && !(adminAccessToplevelEvals { authorizedKeys = [ ]; }).success
+        && !(adminAccessToplevelEvals {
+          authorizedKeys = [
+            ""
+            "   "
+          ];
+        }).success
+        && (adminAccessToplevelEvals {
+          authorizedKeys = [ ];
+          authorizedKeysFile = "/run/keys/admin_authorized_keys";
+        }).success;
+
       # The hardened appliance, as it lands on real hardware: UEFI, Vaultwarden on, keep-web and
       # frost-gate off (frost-gate TPM unlock is opt-in and added later). debug-access is NOT
       # included and Vaultwarden signups default-deny, so this is the secure default profile.
@@ -422,6 +469,12 @@
             "touch $out"
           else
             "echo 'adminAccess bring-up firewall scoping regression: with lanBringupInterface set the SSH opening was not scoped to the named NIC (it hit the global all-interface list) or dropped the mesh interface opening, or the named NIC opening leaked into the null-fallback/off cases, or the null fallback stopped opening the global list' >&2; exit 1"
+        );
+        adminaccess-antilockout = pkgs.runCommand "adminaccess-antilockout" { } (
+          if adminAccessAntiLockoutHolds then
+            "touch $out"
+          else
+            "echo 'adminAccess anti-lockout regression: the module either built with no usable key (empty or whitespace-only authorizedKeys and no authorizedKeysFile, a permanent key-only-SSH remote lockout) or refused a valid config (a real inline key, or the installer authorizedKeysFile escape)' >&2; exit 1"
         );
         ha-failover = pkgs.testers.runNixOSTest {
           imports = [ ./tests/ha-failover.nix ];
