@@ -150,6 +150,19 @@
       assert_hardened(active, "keep-node-vault-mesh-push.service")
       assert_hardened(standby, "keep-node-vault-promote.service")
 
+      # --- Drop a SECOND probe attachment + Send, but do NOT run keep-node-vault-files manually. The
+      # push below must pull in a fresh file-sync itself (Wants/After keep-node-vault-files), so these
+      # cross the mesh only if the push->file-sync edges are wired. This fails if those edges are removed.
+      active.succeed(
+          "install -d -o vaultwarden -g vaultwarden -m 0700 /var/lib/vaultwarden/attachments/pull-cipher && "
+          "echo 'mesh-pull-attach-marker' > /tmp/ppf && install -o vaultwarden -g vaultwarden -m 0600 "
+          "/tmp/ppf /var/lib/vaultwarden/attachments/pull-cipher/pull-file"
+      )
+      active.succeed(
+          "echo 'mesh-pull-send-marker' > /tmp/psf && install -o vaultwarden -g vaultwarden -m 0600 "
+          "/tmp/psf /var/lib/vaultwarden/sends/pull-send"
+      )
+
       active.systemctl("start keep-node-vault-mesh-push.service")
 
       # --- The standby received the DB replica over the mesh; restoring it yields the probe row. A
@@ -179,6 +192,25 @@
       )
       send = standby.succeed("cat /var/lib/vaultwarden/replica/sends/probe-send").strip()
       assert send == "mesh-send-marker", f"Send did not cross the mesh: {send!r}"
+
+      # ...and the pull-probes -- which were NEVER hand-synced -- also crossed, proving the push pulled
+      # in keep-node-vault-files on its own via the Wants/After edges.
+      standby.wait_until_succeeds(
+          "test -f /var/lib/vaultwarden/replica/attachments/pull-cipher/pull-file", timeout=30
+      )
+      pull_attach = standby.succeed(
+          "cat /var/lib/vaultwarden/replica/attachments/pull-cipher/pull-file"
+      ).strip()
+      assert pull_attach == "mesh-pull-attach-marker", (
+          f"push did not pull in the file-sync (attachment): {pull_attach!r}"
+      )
+      standby.wait_until_succeeds(
+          "test -f /var/lib/vaultwarden/replica/sends/pull-send", timeout=30
+      )
+      pull_send = standby.succeed("cat /var/lib/vaultwarden/replica/sends/pull-send").strip()
+      assert pull_send == "mesh-pull-send-marker", (
+          f"push did not pull in the file-sync (Send): {pull_send!r}"
+      )
 
       # --- Deletion propagation: `rsync --delete` on the active push path must remove files the
       # standby holds once they leave the active. Delete the probe attachment on the active, re-run the

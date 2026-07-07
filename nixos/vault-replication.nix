@@ -318,12 +318,16 @@ in
       };
 
       # Litestream replicates ONLY db.sqlite3, never the attachment/Send files it references
-      # (attachments/<cipher>/<id>, sends/<id> -- E2E ciphertext on disk). A separate periodic sync
-      # mirrors those into the same replica dir so a promoted standby has the files a restored row
-      # points at. It runs on its own timer (OnUnitActiveSec below), independent of the ~1s DB stream:
-      # two async replicators cannot give atomic file-before-row, so this is bounded eventual
-      # consistency (the design doc permits it) -- a row can be restored up to one timer interval
-      # (~15s) ahead of its file, and the gap self-heals on the next sync.
+      # (attachments/<cipher>/<id>, sends/<id> -- E2E ciphertext on disk). This sync mirrors those into
+      # the same replica dir so a promoted standby has the files a restored row points at. The standalone
+      # timer below keeps replicaDir current between pushes; keep-node-vault-mesh-push ALSO pulls this
+      # sync in immediately before each push (Wants/After), so the pushed replicaDir has files as fresh
+      # as the sync's most recent completion. This NARROWS (does not close) the row-before-file window at
+      # the standby: the shipped db.sqlite3 still lags live by litestream's flush interval L (~1s), so a
+      # row is only guaranteed to have its file present when the file-sync rsync scan finished within L of
+      # the DB snapshot -- i.e. only while the scan duration < litestream lag. On a large attachments/ tree
+      # the rsync directory walk can exceed ~1s, leaving a residual gap. Narrowing still matters because
+      # once the active is gone at promote time a missing-file gap can no longer self-heal.
       systemd.services.keep-node-vault-files = {
         description = "Replicate Vaultwarden attachments + Sends (multi-node HA)";
         after = [
@@ -688,11 +692,28 @@ in
         description = "Push the vault replica to the standby over the mesh";
         # Order (and pull in) Litestream where it runs on this node so the push does not fire against a
         # not-yet-populated replicaDir on boot; the empty-replica guard below still covers the window.
+        # Also pull in a fresh attachment/Send sync (keep-node-vault-files) BEFORE each push, so the
+        # pushed replicaDir has files as fresh as the sync's most recent completion. This NARROWS (does
+        # not close) the row-before-file window at the standby: the shipped db.sqlite3 still lags live by
+        # litestream's flush interval L (~1s), so a row is only guaranteed to have its file present when
+        # the file-sync rsync scan finished within L of the DB snapshot -- i.e. only while the scan
+        # duration < litestream lag. On a large attachments/ tree the rsync walk can exceed ~1s, leaving a
+        # residual gap. Narrowing still matters because the standby cannot self-heal once the active is
+        # gone at promote time. Wants (not Requires): a file-sync that fails on 23/24 must not block the
+        # push. Note this After also couples the push to vaultwarden's lifecycle (keep-node-vault-files
+        # requires+after vaultwarden), so a vaultwarden restart transiently stalls the push chain on the
+        # file-sync's start job, bounded by systemd's DefaultTimeoutStartSec (90s).
         after = [
           "keep-node-mesh.service"
         ]
-        ++ lib.optional cfg.litestream.enable "keep-node-litestream.service";
-        wants = lib.optional cfg.litestream.enable "keep-node-litestream.service";
+        ++ lib.optionals cfg.litestream.enable [
+          "keep-node-litestream.service"
+          "keep-node-vault-files.service"
+        ];
+        wants = lib.optionals cfg.litestream.enable [
+          "keep-node-litestream.service"
+          "keep-node-vault-files.service"
+        ];
         path = [
           pkgs.rsync
           config.keepNode.mesh.package
