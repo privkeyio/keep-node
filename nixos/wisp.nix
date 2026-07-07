@@ -12,6 +12,8 @@ let
   cfg = config.keepNode.wisp;
 in
 {
+  imports = [ ./mesh-interface.nix ];
+
   options.keepNode.wisp = {
     enable = lib.mkEnableOption "on-box wisp relay bound to the encrypted mesh";
 
@@ -23,11 +25,12 @@ in
 
     meshInterface = lib.mkOption {
       type = lib.types.str;
-      default = "utun100";
+      default = config.keepNode.mesh.interface;
+      defaultText = lib.literalExpression "config.keepNode.mesh.interface";
       description = ''
         The nvpn mesh interface. The relay's port is opened only here, so the LAN and the WireGuard
-        underlay never reach it. Must match nvpn's runtime tun device (same coupling the other
-        mesh-scoped services carry).
+        underlay never reach it. Defaults to the shared `keepNode.mesh.interface` so it can't drift
+        from nvpn's runtime device; override only for an unusual per-service topology.
       '';
     };
 

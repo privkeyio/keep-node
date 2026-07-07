@@ -12,6 +12,8 @@ let
   cfg = config.keepNode.adminAccess;
 in
 {
+  imports = [ ./mesh-interface.nix ];
+
   options.keepNode.adminAccess = {
     enable = lib.mkEnableOption "hardened key-only SSH admin access over the mesh (the keepadmin account)";
 
@@ -28,10 +30,12 @@ in
 
     meshInterface = lib.mkOption {
       type = lib.types.str;
-      default = "utun100";
+      default = config.keepNode.mesh.interface;
+      defaultText = lib.literalExpression "config.keepNode.mesh.interface";
       description = ''
         The nvpn mesh interface. SSH's port is opened ONLY here, so only rostered, WireGuard-
-        authenticated mesh peers can reach sshd , not the LAN, not the underlay. Matches nvpn's device.
+        authenticated mesh peers can reach sshd , not the LAN, not the underlay. Defaults to the shared
+        `keepNode.mesh.interface` so it can't drift from nvpn's device.
       '';
     };
 
