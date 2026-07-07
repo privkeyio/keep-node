@@ -225,6 +225,63 @@
           24
         ]).success; # partially-bad list is rejected
 
+      # Pure-eval guard for the adminAccess bring-up SSH firewall scoping: when lanBringupInterface
+      # names a NIC, the bring-up opening must land on that interface and NOT on the global (all-
+      # interface) allowedTCPPorts list, so a public/WAN NIC is never opened; with no interface named
+      # it falls back to the global list (the generic image, which can't know the NIC name).
+      adminAccessFirewall =
+        {
+          lanBringup,
+          lanBringupInterface,
+        }:
+        (nixpkgs.lib.nixosSystem {
+          inherit system;
+          modules = [
+            ./nixos/admin-access.nix
+            {
+              fileSystems."/" = {
+                device = "/dev/disk/by-label/root";
+                fsType = "ext4";
+              };
+              boot.loader.grub.enable = false;
+              networking.firewall.enable = true;
+              keepNode.adminAccess = {
+                enable = true;
+                authorizedKeys = [ "ssh-ed25519 AAAAeval-only-fixture-key keepadmin-eval" ];
+                inherit lanBringup lanBringupInterface;
+              };
+            }
+          ];
+        }).config.networking.firewall;
+      lanBringupScopingHolds =
+        let
+          scoped = adminAccessFirewall {
+            lanBringup = true;
+            lanBringupInterface = "eth0";
+          };
+          global = adminAccessFirewall {
+            lanBringup = true;
+            lanBringupInterface = null;
+          };
+          off = adminAccessFirewall {
+            lanBringup = false;
+            lanBringupInterface = null;
+          };
+        in
+        # scoped: port 22 opened on the named NIC, and NOT on the global all-interface list
+        builtins.elem 22 (scoped.interfaces.eth0.allowedTCPPorts or [ ])
+        && !(builtins.elem 22 scoped.allowedTCPPorts)
+        # scoped: the mesh interface (utun100, the default meshInterface) STILL opens port 22;
+        # scoping the bring-up opening must never drop the mesh opening.
+        && builtins.elem 22 (scoped.interfaces.utun100.allowedTCPPorts or [ ])
+        # no interface named: fall back to the global list, and eth0 is NOT opened (the scoped per-NIC
+        # opening only appears in the scoped case).
+        && builtins.elem 22 global.allowedTCPPorts
+        && !(builtins.elem 22 (global.interfaces.eth0.allowedTCPPorts or [ ]))
+        # bring-up off: no global opening at all, and eth0 is NOT opened.
+        && !(builtins.elem 22 off.allowedTCPPorts)
+        && !(builtins.elem 22 (off.interfaces.eth0.allowedTCPPorts or [ ]));
+
       # The hardened appliance, as it lands on real hardware: UEFI, Vaultwarden on, keep-web and
       # frost-gate off (frost-gate TPM unlock is opt-in and added later). debug-access is NOT
       # included and Vaultwarden signups default-deny, so this is the secure default profile.
@@ -356,6 +413,12 @@
             "echo 'frostGate sealPcrs guard regression: a bad sealPcrs value (empty, negative, or out-of-range PCR) was unexpectedly accepted' >&2; exit 1"
           else
             "touch $out"
+        );
+        adminaccess-bringup-scoping = pkgs.runCommand "adminaccess-bringup-scoping" { } (
+          if lanBringupScopingHolds then
+            "touch $out"
+          else
+            "echo 'adminAccess bring-up firewall scoping regression: with lanBringupInterface set the SSH opening was not scoped to the named NIC (it hit the global all-interface list) or dropped the mesh interface opening, or the named NIC opening leaked into the null-fallback/off cases, or the null fallback stopped opening the global list' >&2; exit 1"
         );
         ha-failover = pkgs.testers.runNixOSTest {
           imports = [ ./tests/ha-failover.nix ];

@@ -61,6 +61,18 @@ in
         (mesh-only); flip back to false once the node has joined the mesh.
       '';
     };
+
+    lanBringupInterface = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "eth0";
+      description = ''
+        Only meaningful with `lanBringup = true`. Names the LAN interface the bring-up SSH opening is
+        scoped to, so port 22 is NOT opened on a public/WAN NIC. Leave null (the default) for the
+        generic installer image, which cannot know the NIC name and so opens all interfaces; the
+        `@RFC1918` `AllowUsers` backstop still refuses public/WAN sources at auth time either way.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -87,6 +99,21 @@ in
         # on ALL interfaces with password auth + a known password, defeating the mesh-only perimeter.
         assertion = !(config.keepNode.debugAccess.enable or false);
         message = "keepNode.adminAccess.enable and keepNode.debugAccess.enable are both true: they define conflicting sshd settings, and debug-access re-exposes SSH on all interfaces with password auth. Enable only one.";
+      }
+      {
+        # An empty/whitespace-only lanBringupInterface passes the `!= null` check below and emits
+        # networking.firewall.interfaces."".allowedTCPPorts = [22] (an invalid empty interface name)
+        # while suppressing the global all-interface fallback: the firewall apply can fail and leave
+        # sshd reachable on 0.0.0.0 with nothing scoping it. Require a usable NIC name when set.
+        assertion = cfg.lanBringupInterface == null || lib.strings.trim cfg.lanBringupInterface != "";
+        message = "keepNode.adminAccess.lanBringupInterface is set to an empty or whitespace-only string: it must name a LAN interface (e.g. \"eth0\") or be null. An empty name produces an invalid firewall rule and suppresses the global bring-up opening. Set a real interface name (or leave it null).";
+      }
+      {
+        # lanBringupInterface only scopes the bring-up opening; it does nothing unless lanBringup is on.
+        # Naming an interface without enabling bring-up opens no LAN port at all, so an operator who set
+        # it may wrongly believe scoped bring-up is active. Fail rather than silently open nothing.
+        assertion = cfg.lanBringupInterface == null || cfg.lanBringup;
+        message = "keepNode.adminAccess.lanBringupInterface is set but keepNode.adminAccess.lanBringup is false: the interface only scopes the bring-up SSH opening, which is off, so no LAN port is opened. Set lanBringup = true to activate scoped bring-up (or leave lanBringupInterface null).";
       }
     ];
 
@@ -173,10 +200,22 @@ in
     # mesh-only deploy the AllowUsers=keepadmin@10.44.0.0/16 CIDR backstop above covers a mismatch by
     # denying any non-mesh source at auth time. (Under lanBringup the backstop is intentionally widened
     # to RFC1918, which still denies public/WAN sources but allows the LAN for onboarding.)
-    networking.firewall.interfaces.${cfg.meshInterface}.allowedTCPPorts = [ 22 ];
+    # SSH's port is opened on the mesh interface always, plus during bring-up on the LAN. When
+    # lanBringupInterface names the LAN NIC the bring-up opening is scoped to it, so a public/WAN NIC
+    # is never opened; otherwise (the generic installer image, which can't know the NIC name) it falls
+    # back to opening all interfaces via the global list below. Either way the @RFC1918 AllowUsers
+    # backstop refuses public/WAN sources at auth time.
+    networking.firewall.interfaces = lib.mkMerge [
+      { ${cfg.meshInterface}.allowedTCPPorts = [ 22 ]; }
+      (lib.mkIf (cfg.lanBringup && cfg.lanBringupInterface != null) {
+        ${cfg.lanBringupInterface}.allowedTCPPorts = [ 22 ];
+      })
+    ];
 
-    # Bring-up only: ALSO open SSH globally (the LAN), because a fresh node has no mesh to reach it
-    # over yet. Still key-only. Off by default, so a declarative deploy stays mesh-only.
-    networking.firewall.allowedTCPPorts = lib.optional cfg.lanBringup 22;
+    # Global (all-interface) bring-up opening only when no LAN interface is named. Off by default, so a
+    # declarative deploy stays mesh-only; a scoped bring-up (lanBringupInterface set) stays off WAN.
+    networking.firewall.allowedTCPPorts = lib.optional (
+      cfg.lanBringup && cfg.lanBringupInterface == null
+    ) 22;
   };
 }
