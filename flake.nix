@@ -556,7 +556,8 @@
           _module.args = {
             inherit adminKeyFixture;
             # install-keepnode's guards abort before the install, so the embedded closure is never
-            # used -- a minimal stand-in keeps the test build light instead of the full appliance.
+            # installed (it is still built into the test VM's store) -- a minimal stand-in keeps the
+            # test build light instead of the full appliance.
             keepnodeToplevel =
               (nixpkgs.lib.nixosSystem {
                 inherit system;
