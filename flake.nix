@@ -151,6 +151,30 @@
         printf '%s\n\nsp1\n' "$kshare" | keep --no-mlock --path "$out/holder" frost import >/dev/null
       '';
 
+      # Like frostGroupFixture but a 2-of-3 group, for the through-the-gate 2-of-3 boot test. `box` is
+      # the dealer DB (group + all shares, runs oprf-provision); `holder` holds share 2 and `holder2`
+      # holds share 3, so the box plus ANY ONE holder is a quorum. Same IFD/eval-time npub rationale as
+      # the 2-of-2 fixture (the gate bakes the npub at build time).
+      frostGroupFixture2of3 =
+        pkgs.runCommand "frost-group-fixture-2of3" { nativeBuildInputs = [ keep-cli ]; }
+          ''
+            export HOME="$TMPDIR" KEEP_PASSWORD=fixturepass123 KEEP_YES=1
+            mkdir -p "$out"
+            keep --no-mlock --path "$out/box" init >/dev/null
+            gen="$(keep --no-mlock --path "$out/box" frost generate -t 2 -s 3 --name g 2>&1)"
+            npub="$(printf '%s' "$gen" | grep -aoE 'npub1[a-z0-9]{50,}' | head -1)"
+            [ -n "$npub" ] || { echo "fixture: no npub from frost generate" >&2; exit 1; }
+            printf '%s' "$npub" > "$out/npub"
+            import_share() {
+              ksh="$(printf 'sp1\nsp1\n' | keep --no-mlock --path "$out/box" frost export --share "$1" --group "$npub" 2>&1 | grep -aoE 'kshare1[a-z0-9]+' | head -1)"
+              [ -n "$ksh" ] || { echo "fixture: no kshare for share $1" >&2; exit 1; }
+              keep --no-mlock --path "$2" init >/dev/null
+              printf '%s\n\nsp1\n' "$ksh" | keep --no-mlock --path "$2" frost import >/dev/null
+            }
+            import_share 2 "$out/holder"
+            import_share 3 "$out/holder2"
+          '';
+
       # A shared Vaultwarden JWT signing key (rsa_key.pem, 2048-bit RSA PKCS#8) for the multi-node
       # HA test: both nodes install THESE bytes so a token minted on one validates on the other.
       # Test-only (real deploys deliver an out-of-band key); generated once and cached.
@@ -481,6 +505,13 @@
           _module.args = {
             keepCliPackage = keep-cli;
             inherit frostGroupFixture;
+          };
+        };
+        oprf-gate-2of3 = pkgs.testers.runNixOSTest {
+          imports = [ ./tests/oprf-gate-2of3.nix ];
+          _module.args = {
+            keepCliPackage = keep-cli;
+            frostGroupFixture = frostGroupFixture2of3;
           };
         };
         oprf-unlock = pkgs.testers.runNixOSTest {

@@ -7,13 +7,15 @@
 # (systemd-cryptenroll --tpm2-device=auto) and systemd-cryptsetup attach for the unlock.
 #
 # v2 (later): replace the TPM-only seal with the FROST quorum (the on-box share in the secure
-# element PLUS the phone share) so the volume key is *threshold*-derived. That is what makes
+# element PLUS any ONE holder share -- the phone or a replica; the default is 2-of-3, so the box plus
+# either holder suffices and neither specific holder is required) so the volume key is
+# *threshold*-derived. That is what makes
 # "no single box can decrypt" true; the TPM seal here is the box's local protection only.
 #
 # Scope/limits of v1 (intentional, not gaps to "fix" here):
 #   * Auto-unlocks at boot with no PIN: the node must come back unattended after a power blip,
 #     so this layer is full-disk-encryption at rest only. Making power-on insufficient to
-#     decrypt is v2's job (the FROST quorum needs the phone share, so a powered-on box alone
+#     decrypt is v2's job (the FROST quorum needs a holder share, so a powered-on box alone
 #     cannot release the key).
 #   * Bound to PCR 7 by default: PCR 7 (Secure Boot policy) is weak: it does not measure the
 #     kernel/initrd/cmdline. The `sealPcrs` option can also bind PCR 11 (the UKI measurement),
@@ -24,7 +26,7 @@
 #   * No local recovery keyslot by default: the random bootstrap passphrase is discarded after
 #     enrollment on purpose. Writing a LUKS-unlocking recovery key to the (unencrypted) root would
 #     gut the "steal the box, get nothing" premise. Recovery is the node replicas (other nodes hold
-#     the data) and the v2 FROST quorum (the phone share), never a local secret at rest. The cost:
+#     the data) and the v2 FROST quorum (any one holder share), never a local secret at rest. The cost:
 #     a PCR 7 change (firmware/Secure Boot/board swap) makes this node's volume unreadable until
 #     re-provisioned from a replica. Fail-closed by design. (The opt-in `recoveryKeyFile` option
 #     deliberately relaxes this for a single-node deploy with no replica yet; see that option.)
@@ -179,7 +181,14 @@ let
           # together. The 32-byte key comes back over --pipe into the RAM-only keyfile; cryptsetup
           # (which does need broad privilege) stays in this unit. --wait propagates the scope's exit
           # so a failed unlock still fails closed.
-          ( umask 077
+          # Retry the quorum unlock until it converges or the budget elapses. The box rebuilds its peer
+          # set from live announces each boot, so it reports "insufficient peers" until holders are
+          # discovered, and a reboot with only some holders online (2-of-3 with one down) needs a few
+          # tries to converge on the online subset. Pre-quorum failures abort before sending an OPRF
+          # eval, so tight retries don't burn keep's per-requester eval rate limit. Falling out of the
+          # loop (budget exhausted, no quorum) fails closed.
+          unlock_deadline=$(( $(date +%s) + ${toString cfg.bootUnlockTimeoutSec} ))
+          until ( umask 077
             KEEP_PASSWORD="$(cat "$CREDENTIALS_DIRECTORY/keep-password")" \
               ${systemdRun} --pipe --wait --collect --quiet \
                 -E KEEP_PASSWORD \
@@ -211,6 +220,16 @@ let
                   --tpm-tcti ${lib.escapeShellArg cfg.tpmTcti} \
                   --share-file "$sharef" \
                 > "$keyf" )
+          do
+            # `keep oprf-unlock` already spends up to ~24s discovering peers before it errors, so bound
+            # by wall-clock, not attempt count: past the deadline with no successful unlock, fail closed.
+            if [ "$(date +%s)" -ge "$unlock_deadline" ]; then
+              echo "frost-gate(oprf): quorum unreachable within ${toString cfg.bootUnlockTimeoutSec}s; failing closed" >&2
+              exit 1
+            fi
+            rm -f "$keyf"
+            sleep 5
+          done
           cryptsetup open --key-file "$keyf" --keyfile-size 32 "$dev" "$mapper"
           rm -f "$keyf" "$sharef"
         fi
@@ -575,6 +594,20 @@ in
       };
     };
 
+    bootUnlockTimeoutSec = lib.mkOption {
+      type = lib.types.int;
+      default = 90;
+      description = ''
+        mode = "oprf": how long (seconds) the boot gate keeps retrying the quorum unlock before failing
+        closed. The gate rebuilds its peer set from live holder announces each boot, so right after boot
+        the unlock returns "insufficient peers" until enough holders are discovered. Retrying (~5s apart)
+        within this budget lets a reboot with only SOME holders online (e.g. 2-of-3 with one holder down)
+        converge, while a genuine lack of quorum fails closed after it elapses. Pre-quorum attempts send
+        no OPRF evaluation, so the retries do not burn keep's eval rate limit. Span a few holder announce
+        intervals (default announce 20s).
+      '';
+    };
+
     # --- mode = "oprf" options (the v2 threshold-OPRF unlock) ---
 
     keepPackage = lib.mkOption {
@@ -888,7 +921,9 @@ in
         RuntimeDirectoryMode = "0751";
         # Bound the boot unlock: a hostile or hung relay must not stall the gate (and thus boot)
         # indefinitely. On timeout the unit fails and the volume stays locked (fail-closed).
-        TimeoutStartSec = 90;
+        # Must outlast the unlock retry budget (bootUnlockTimeoutSec) plus the cryptsetup open + mount
+        # that follow, or systemd would kill a legitimately-still-converging quorum unlock mid-retry.
+        TimeoutStartSec = cfg.bootUnlockTimeoutSec + 60;
       };
       # Provision (first boot) or TPM2-unlock (later boots), then mount the volume at the data
       # dir. Doing the mount here (rather than a declarative fileSystems entry) keeps the
