@@ -78,8 +78,8 @@ in
       type = lib.types.nullOr lib.types.path;
       default = null;
       description = ''
-        File holding the SHARED cluster keep identity (an `nsec1...`) that all nodes replicate under
-        (KEEP_STATE_IDENTITY). Generate it once for the cluster and deliver the SAME bytes to every
+        File holding the SHARED cluster keep identity (an `nsec1...` bech32 or 64-char hex secret) that
+        all nodes replicate under (KEEP_STATE_IDENTITY). Generate it once for the cluster and deliver the SAME bytes to every
         node out-of-band (like the shared Vaultwarden JWT key). Must be a runtime path, not a Nix
         store path. Delivered via a systemd credential and exported into the daemon's environment.
       '';
@@ -185,7 +185,7 @@ in
         KEEP_STATE_RELAY = cfg.stateRelay;
         KEEP_STATE_ROLE = cfg.stateRole;
       }
-      // lib.optionalAttrs cfg.allowInsecureWs {
+      // lib.optionalAttrs (cfg.allowInsecureWs && cfg.stateRelay != null) {
         KEEP_ALLOW_WS = "1";
       };
       serviceConfig = {
@@ -205,6 +205,7 @@ in
           in
           if exports != "" then
             pkgs.writeShellScript "keep-web-start" ''
+              set -euo pipefail
               ${exports}
               exec ${lib.getExe cfg.package}
             ''

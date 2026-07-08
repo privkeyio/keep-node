@@ -1,8 +1,8 @@
-# keep-state replication over wisp (keep-node-r5w). A relay + an active + a standby keep-web node, all
+# keep-state replication over wisp. A relay + an active + a standby keep-web node, all
 # sharing the cluster vault DATA KEY (KEEP_STORAGE_KEY), the vault password, and the state identity.
 # Proves the DEPLOYMENT wires end to end: each keep-web creates its vault with the SHARED data key,
-# unlocks it (shared password), and connects keep-web to the state relay for replication (active
-# publishes, standby subscribes). The replication LOGIC itself -- active write -> relay -> standby
+# unlocks it (shared password), and reaches keep-web's keep-state-replication-enabled state for its
+# role (active publishes, standby subscribes). The replication LOGIC itself -- active write -> relay -> standby
 # reconstruct + read-back -- is proven at the keep-web level by privkeyio/keep's e2e test; keep-web's
 # HTTP API does not expose driving/reading the replicated tables (keys/descriptors/relay_configs)
 # directly, so this validates the deployment integration rather than re-driving the record round-trip.
@@ -81,15 +81,11 @@ in
         node.wait_until_succeeds(
             "journalctl -u keep-web.service | grep -q 'vault unlocked'", timeout=60
         )
-        # keep-state replication is wired and enabled for this node's role.
+        # keep-state replication reaches the enabled state for this node's role. This is keep-web's
+        # own config-level readiness log, not an independent check that the relay connection is live;
+        # the wire round-trip (active write -> relay -> standby reconstruct) is covered by keep's e2e test.
         node.wait_until_succeeds(
             "journalctl -u keep-web.service | grep -q 'keep-state replication enabled'", timeout=60
         )
-
-    # Both nodes seeded the SAME data key: their vault headers wrap an identical data key under their
-    # own password. (The wire round-trip is covered by keep's e2e test; this asserts the deployment
-    # invariant that makes it decryptable -- both created a shared-key vault and are live on the relay.)
-    active.succeed("journalctl -u keep-web.service | grep -q 'replication enabled'")
-    standby.succeed("journalctl -u keep-web.service | grep -q 'replication enabled'")
   '';
 }
