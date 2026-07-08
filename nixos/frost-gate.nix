@@ -45,6 +45,11 @@ let
   systemdCryptsetup = "${pkgs.systemd}/lib/systemd/systemd-cryptsetup";
   systemdRun = "${pkgs.systemd}/bin/systemd-run";
 
+  # Wall-clock cap on a SINGLE oprf-unlock attempt (the transient scope's RuntimeMaxSec). The boot
+  # gate's TimeoutStartSec must budget for one final attempt launched just under the retry deadline,
+  # so this value is referenced in both places rather than duplicated as a literal.
+  oprfAttemptMaxSec = 90;
+
   # The systemd .device unit for the backing volume (empty when unset). The gate orders after
   # and requires it so the probe never races a device that has not yet appeared/settled.
   deviceUnits = lib.optionals (cfg.volumeDevice != null) [
@@ -187,7 +192,9 @@ let
           # tries to converge on the online subset. Pre-quorum failures abort before sending an OPRF
           # eval, so tight retries don't burn keep's per-requester eval rate limit. Falling out of the
           # loop (budget exhausted, no quorum) fails closed.
-          unlock_deadline=$(( $(date +%s) + ${toString cfg.bootUnlockTimeoutSec} ))
+          # Deadline off CLOCK_MONOTONIC (/proc/uptime), not wall-clock: NTP can step the clock during
+          # early boot, and a forward step off `date +%s` would fail closed before the budget is spent.
+          unlock_deadline=$(( $(cut -d. -f1 /proc/uptime) + ${toString cfg.bootUnlockTimeoutSec} ))
           until ( umask 077
             KEEP_PASSWORD="$(cat "$CREDENTIALS_DIRECTORY/keep-password")" \
               ${systemdRun} --pipe --wait --collect --quiet \
@@ -197,7 +204,7 @@ let
                 -p CapabilityBoundingSet= \
                 -p AmbientCapabilities= \
                 -p NoNewPrivileges=yes \
-                -p RuntimeMaxSec=90 \
+                -p RuntimeMaxSec=${toString oprfAttemptMaxSec} \
                 -p SystemCallFilter=@system-service \
                 -p SystemCallArchitectures=native \
                 -p RestrictAddressFamilies="AF_UNIX AF_NETLINK AF_INET AF_INET6" \
@@ -222,13 +229,15 @@ let
                 > "$keyf" )
           do
             # `keep oprf-unlock` already spends up to ~24s discovering peers before it errors, so bound
-            # by wall-clock, not attempt count: past the deadline with no successful unlock, fail closed.
-            if [ "$(date +%s)" -ge "$unlock_deadline" ]; then
+            # by elapsed time, not attempt count: past the deadline with no successful unlock, fail closed.
+            if [ "$(cut -d. -f1 /proc/uptime)" -ge "$unlock_deadline" ]; then
               echo "frost-gate(oprf): quorum unreachable within ${toString cfg.bootUnlockTimeoutSec}s; failing closed" >&2
               exit 1
             fi
             rm -f "$keyf"
-            sleep 5
+            # Jittered backoff: a power blip reboots a whole fleet at once, so a fixed cadence would
+            # retry the quorum in lockstep against one relay/holder set. Spread the retries (3-7s).
+            sleep $(( 3 + RANDOM % 5 ))
           done
           cryptsetup open --key-file "$keyf" --keyfile-size 32 "$dev" "$mapper"
           rm -f "$keyf" "$sharef"
@@ -921,9 +930,10 @@ in
         RuntimeDirectoryMode = "0751";
         # Bound the boot unlock: a hostile or hung relay must not stall the gate (and thus boot)
         # indefinitely. On timeout the unit fails and the volume stays locked (fail-closed).
-        # Must outlast the unlock retry budget (bootUnlockTimeoutSec) plus the cryptsetup open + mount
-        # that follow, or systemd would kill a legitimately-still-converging quorum unlock mid-retry.
-        TimeoutStartSec = cfg.bootUnlockTimeoutSec + 60;
+        # Must outlast the unlock retry budget (bootUnlockTimeoutSec) PLUS one final attempt that can
+        # launch just under the deadline and run its full RuntimeMaxSec (oprfAttemptMaxSec), plus the
+        # cryptsetup open + mount that follow, or systemd would SIGTERM a still-converging unlock.
+        TimeoutStartSec = cfg.bootUnlockTimeoutSec + oprfAttemptMaxSec + 60;
       };
       # Provision (first boot) or TPM2-unlock (later boots), then mount the volume at the data
       # dir. Doing the mount here (rather than a declarative fileSystems entry) keeps the
