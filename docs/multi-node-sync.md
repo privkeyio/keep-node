@@ -30,10 +30,13 @@
 > (`meshReplication.maxLagSeconds`): the active heartbeats the replica on every push, and a periodic
 > `keep-node-vault-lag-check` on the standby fails once the received heartbeat is older than the
 > threshold, so an idle-but-in-sync standby reads healthy while a stalled/partitioned one is surfaced.
-> Still to come for M1: moving the quorum to **2-of-3** and Keep-state-over-`wisp` replication.
-> (Relay-based peer discovery over `wisp` is implemented as the opt-in `keepNode.mesh.discovery` mode
-> and tested (`mesh-discovery`); full symmetric-NAT traversal for internet deployment is the remaining
-> piece beyond the VM.)
+> **Keep-state-over-`wisp` replication** now lands too, alongside the Vaultwarden HA above: keep-web
+> (the Keep daemon, a subsystem separate from Vaultwarden) replicates its OWN encrypted vault records
+> , keys, descriptors, relay configs , to a standby over the on-box `wisp` relay under a shared cluster
+> identity, so a promoted node serves the same Keep secrets. See *Keep-state replication* below. (The
+> 2-of-3 quorum is covered by the `oprf-unlock-2of3` test.) Relay-based peer discovery over `wisp` is
+> implemented as the opt-in `keepNode.mesh.discovery` mode and tested (`mesh-discovery`); full
+> symmetric-NAT traversal for internet deployment is the remaining piece beyond the VM.
 > This chapter inventories Vaultwarden's state and the constraints that design has to respect.
 
 Vaultwarden (1.36.x here) keeps its state under one data directory, the FROST-gated LUKS
@@ -114,3 +117,33 @@ Three categories matter for replication and for how much a replica is trusted:
   "ciphertext-only replica" only holds for a cold standby.
 - Bounded replication lag, surfaced as an availability/consistency metric, since failover correctness
   (sessions, revisions, 2FA) depends on it.
+
+## Keep-state replication (keep-web)
+
+Everything above concerns **Vaultwarden**. Keep also runs **keep-web**, its own headless daemon with an
+encrypted vault (keys, wallet descriptors, relay configs, and per-node FROST shares). For a promoted
+standby to serve the same Keep secrets, that vault state replicates too, over the same mesh, using the
+on-box `wisp` relay as the transport instead of file streaming.
+
+How it works (implemented in `privkeyio/keep`, wired here by `keepNode.keepWeb`):
+
+- **Shared cluster identity.** One Keep Nostr keypair for the cluster, distributed out-of-band to every
+  node (like the shared Vaultwarden JWT key). The active publishes under it; the standby subscribes to
+  that one author. Single-writer: `stateRole = "active"` publishes local writes, `"standby"` subscribes
+  and reconstructs. A promoted standby is redeployed as `active`.
+- **Per-record addressable events.** Each replicated redb record is one NIP-78 addressable event
+  (kind 30078), `d`-tag `keep:<table>:<record-id>`, so a newer write supersedes the old and the relay
+  keeps only the latest. The content is the record's already-vault-encrypted bytes, NIP-44-encrypted to
+  the shared identity, so the relay only ever holds ciphertext.
+- **Shares are never replicated.** Only `keys`, `descriptors`, and `relay_configs` propagate. Each node
+  keeps its OWN FROST share; the consumer rejects any other table.
+- **Shared vault data key.** The double-wrapped bytes only decrypt on the standby if both nodes share
+  the vault's record-encryption key. Each node seeds the SAME key at first-run via `KEEP_STORAGE_KEY`
+  (`storageKeyFile`), delivered onto the encrypted volume like the other cluster secrets; each node
+  still wraps it under its own password.
+
+Configuration (`keepNode.keepWeb`): `stateRelay` (the mesh `wisp`, e.g. `ws://<mesh-ip>:7777`),
+`stateIdentityFile` (the shared cluster nsec), `storageKeyFile` (the shared data key), and `stateRole`.
+The `keep-state-replication` nixosTest brings up a relay plus an active and a standby node sharing the
+data key, and asserts both create their shared-key vault and connect keep-web to the relay; the wire
+round-trip (active write → relay → standby reconstruct + read-back) is covered by keep's own e2e test.

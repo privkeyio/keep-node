@@ -4,9 +4,11 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     # keep-web (headless daemon, FROST co-signer, NIP-46 bunker) is built from privkeyio/keep.
-    # keep has no flake, so consume the source and build it here.
+    # keep has no flake, so consume the source and build it here. Pinned to a tagged RELEASE, not
+    # main-HEAD, so the appliance builds from a curated, known-good version rather than whatever main
+    # happens to be; bump the tag to adopt a newer release deliberately.
     keep = {
-      url = "github:privkeyio/keep";
+      url = "github:privkeyio/keep/v0.5.0";
       flake = false;
     };
     # nostr-vpn (`nvpn`): the node-to-node encrypted mesh transport (boringtun userspace WireGuard,
@@ -33,9 +35,10 @@
 
     # wisp: the on-box nostr relay (Zig), run bound to the mesh interface. Provides the relay the
     # threshold-OPRF quorum + (later) relay-based mesh peer discovery coordinate over, dogfooding
-    # privkey's own relay instead of nostr-rs-relay.
+    # privkey's own relay instead of nostr-rs-relay. Pinned to a tagged RELEASE (not main-HEAD), same
+    # as keep; bump the tag to adopt a newer release.
     wisp = {
-      url = "github:privkeyio/wisp";
+      url = "github:privkeyio/wisp/v0.5.11";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
@@ -456,6 +459,13 @@
         single-node = pkgs.testers.runNixOSTest {
           imports = [ ./tests/single-node.nix ];
           _module.args.keepWebPackage = keep-web;
+        };
+        keep-state-replication = pkgs.testers.runNixOSTest {
+          imports = [ ./tests/keep-state-replication.nix ];
+          _module.args = {
+            keepWebPackage = keep-web;
+            wispModule = wisp.nixosModules.wisp;
+          };
         };
         vw-client-check = pkgs.testers.runNixOSTest {
           imports = [ ./tests/vw-client-check.nix ];
