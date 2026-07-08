@@ -56,15 +56,16 @@
     "keep": {
       "flake": false,
       "locked": {
-        "lastModified": 1782737645,
-        "narHash": "sha256-iMv90IN1piDBpiLEs4Cy+Kvs+sWNcNgV52qUyfN4NHs=",
+        "lastModified": 1783477201,
+        "narHash": "sha256-V1DcTNSwsLoQ5rmaflC4lHmY0l1P9xPlqzKaI2FZ8bY=",
         "owner": "privkeyio",
         "repo": "keep",
-        "rev": "0ce5290443b91cab8b9f5dd974ab5daf88beab2c",
+        "rev": "8d7d3a4b5f9d72efac1d89a8494ca8cabf480a16",
         "type": "github"
       },
       "original": {
         "owner": "privkeyio",
+        "ref": "v0.5.0",
         "repo": "keep",
         "type": "github"
       }
@@ -207,15 +208,16 @@
         ]
       },
       "locked": {
-        "lastModified": 1783387035,
-        "narHash": "sha256-M7YKlLeaMTA0XKkQBK8/5cp4eOWTmqdbYaWNOqn58Ns=",
+        "lastModified": 1783429303,
+        "narHash": "sha256-5lHc8r6k7TdHWZUaekrjjA9yjToPkUYC9+TWYjUyA94=",
         "owner": "privkeyio",
         "repo": "wisp",
-        "rev": "a2c3518e8f623ed4b9088f122b639e7b13e07ecd",
+        "rev": "4ef3ece54610fe905a6268e69ad888a9fcc9d19b",
         "type": "github"
       },
       "original": {
         "owner": "privkeyio",
+        "ref": "v0.5.11",
         "repo": "wisp",
         "type": "github"
       }
