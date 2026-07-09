@@ -681,6 +681,11 @@ in
         enrollment and evaluation on a VERIFIED dealer, so a box that does not attest is refused
         and the boot unlock fails closed. The boot-time gate and the provision unit must also have
         access to this TPM device (see the runbook on keep-node-frost-provision).
+
+        In mode = "oprf" this must be a hardware device TCTI (device:/dev/tpm*); an assertion
+        rejects software/emulator or broker TCTIs (swtpm/mssim/libtpms, cmd:, tabrmd:) that would
+        let the measured-boot attestation fail open. A VM's swtpm still reaches the guest as
+        device:/dev/tpmrm0, so tests are unaffected.
       '';
     };
 
@@ -826,15 +831,14 @@ in
         message = "keepNode.frostGate.mode = \"oprf\" requires keepPackage, group, relay, keepDbPath, keepPasswordCred, and oprfShareCred.";
       }
       {
-        assertion =
-          cfg.mode != "oprf"
-          || (
-            cfg.tpmTcti != ""
-            && !(lib.hasInfix "mssim" cfg.tpmTcti)
-            && !(lib.hasInfix "swtpm" cfg.tpmTcti)
-            && !(lib.hasInfix "libtpms" cfg.tpmTcti)
-          );
-        message = "keepNode.frostGate.tpmTcti must be a hardware TPM TCTI in mode = \"oprf\" (a software/emulator TCTI such as mssim/swtpm/libtpms makes the measured-boot attestation fail open).";
+        # Allowlist, not a denylist: require a `device:` TCTI pointing at a real
+        # TPM chardev (/dev/tpm*). A substring denylist of mssim/swtpm/libtpms
+        # missed other software fronts -- a `cmd:<emulator>` TCTI or a `tabrmd:`
+        # broker that can sit in front of a software TPM -- any of which makes the
+        # measured-boot attestation fail open. Only the kernel device interface
+        # is accepted; a VM's swtpm still reaches the guest as device:/dev/tpmrm0.
+        assertion = cfg.mode != "oprf" || lib.hasPrefix "device:/dev/tpm" cfg.tpmTcti;
+        message = "keepNode.frostGate.tpmTcti must be a hardware TPM device TCTI (device:/dev/tpm*, e.g. the default device:/dev/tpmrm0) in mode = \"oprf\". Only a device: TCTI pointing at a real TPM chardev is accepted; a software/emulator or broker TCTI (swtpm/mssim/libtpms, cmd:, or a tabrmd: broker fronting a software TPM) would make the measured-boot attestation fail open.";
       }
       {
         # PCR 11 is only populated when the box boots a Unified Kernel Image (systemd-stub). Binding
