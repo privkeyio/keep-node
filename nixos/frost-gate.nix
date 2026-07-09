@@ -235,9 +235,17 @@ let
               exit 1
             fi
             rm -f "$keyf"
-            # Jittered backoff: a power blip reboots a whole fleet at once, so a fixed cadence would
-            # retry the quorum in lockstep against one relay/holder set. Spread the retries (3-7s).
-            sleep $(( 3 + RANDOM % 5 ))
+            # Jittered backoff, floored at 10s. Two reasons for the floor: (1) a holder rate-limits a
+            # requester to MAX_OPRF_EVALS_PER_WINDOW=8 per OPRF_EVAL_WINDOW=60s
+            # (keep-frost-net/src/oprf_session.rs); each `keep oprf-unlock` sends one eval per holder, so
+            # retrying faster than ~7.5s could make a legitimate box exhaust its own eval budget against
+            # an online holder and fail to converge (availability self-DoS). Each attempt already carries
+            # a ~5s discovery/wait floor, so a >=10s sleep gives a >=15s inter-eval gap (<=4 evals/60s),
+            # well under the 8/60s budget; the oprf-unlock-2of3 test spaces its retries the same >=10s way.
+            # Do not rely on the ~24s discovery time for this: a fast failure (holder online but declining)
+            # can cycle much quicker. (2) A power blip reboots a whole fleet at once, so the +RANDOM jitter
+            # spreads retries instead of hammering one relay/holder set in lockstep.
+            sleep $(( 10 + RANDOM % 5 ))
           done
           cryptsetup open --key-file "$keyf" --keyfile-size 32 "$dev" "$mapper"
           rm -f "$keyf" "$sharef"
@@ -605,15 +613,17 @@ in
 
     bootUnlockTimeoutSec = lib.mkOption {
       type = lib.types.int;
-      default = 90;
+      default = 120;
       description = ''
         mode = "oprf": how long (seconds) the boot gate keeps retrying the quorum unlock before failing
         closed. The gate rebuilds its peer set from live holder announces each boot, so right after boot
-        the unlock returns "insufficient peers" until enough holders are discovered. Retrying (~5s apart)
-        within this budget lets a reboot with only SOME holders online (e.g. 2-of-3 with one holder down)
-        converge, while a genuine lack of quorum fails closed after it elapses. Pre-quorum attempts send
-        no OPRF evaluation, so the retries do not burn keep's eval rate limit. Span a few holder announce
-        intervals (default announce 20s).
+        the unlock returns "insufficient peers" until enough holders are discovered. Retries are spaced
+        10-14s apart (floored so eval-sending attempts stay under keep's 8/60s OPRF eval rate limit; see
+        the gate script). Within this budget a reboot with only SOME holders online (e.g. 2-of-3 with one
+        holder down) converges, while a genuine lack of quorum fails closed after it elapses. Pre-quorum
+        attempts send no OPRF evaluation, so those retries do not burn the eval rate limit. Sized so a
+        cold start still gets a few eval-sending attempts even when a not-yet-attested holder silently
+        declines and blocks the full ~30s session timeout before the next retry.
       '';
     };
 
