@@ -15,6 +15,7 @@
 {
   keepCliPackage,
   frostGroupFixture,
+  wispModule,
   pkgs,
   ...
 }:
@@ -26,14 +27,25 @@ in
 {
   name = "keep-node-oprf-gate-test";
 
+  # wisp is the production relay; use it (with NIP-42 auth) so the boot gate is
+  # exercised against the real relay, not a permissive stand-in.
   nodes.relay =
     { ... }:
     {
-      services.nostr-rs-relay = {
+      imports = [ wispModule ];
+      services.wisp = {
         enable = true;
+        host = "0.0.0.0";
         port = 7777;
+        openFirewall = true;
+        settings = {
+          auth.required = true;
+          rate_limits = {
+            events_per_minute = 100000;
+            queries_per_minute = 100000;
+          };
+        };
       };
-      networking.firewall.allowedTCPPorts = [ 7777 ];
     };
 
   nodes.box =
@@ -125,7 +137,7 @@ in
         )
 
     start_all()
-    relay.wait_for_unit("nostr-rs-relay.service")
+    relay.wait_for_unit("wisp.service")
     relay.wait_for_open_port(7777)
     holder.wait_for_unit("multi-user.target")
     box.wait_for_file("/dev/tpmrm0")
