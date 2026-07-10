@@ -150,8 +150,17 @@ in
         f"KEEP_DURESS_PASSWORD={duress_cred} {env} {keep} --no-mlock --path /root/holder2 "
         f"frost network duress-provision 2>&1"
     )
-    beacon_npub = must_match(r"npub1[0-9a-z]+", prov, "beacon npub")
-    beacon_salt = must_match(r"\b[0-9a-f]{64}\b", prov, "beacon salt hex")
+    # Anchor to the field labels (and take the captured group) so output ordering
+    # can never bind holder2's own npub or some other hex token to the pin/salt.
+    def match_group1(pattern, text, what):
+        m = re.search(pattern, text)
+        assert m is not None, f"no {what} in output: {text!r}"
+        return m.group(1)
+
+    # `.*?` stays on the label's line (`.` never crosses newlines) and tolerates the
+    # colon inside the salt label, binding the value to its own field.
+    beacon_npub = match_group1(r"Beacon pubkey.*?(npub1[0-9a-z]+)", prov, "beacon npub")
+    beacon_salt = match_group1(r"Salt.*?([0-9a-f]{64})", prov, "beacon salt hex")
 
     # === Duress: holder serves pinned to holder2's beacon, with a sticky state file. ===
     def serve_duress_holder(unit):
@@ -169,6 +178,14 @@ in
         f"--setenv=KEEP_PASSWORD={duress_cred} --setenv=KEEP_YES=1 --setenv=KEEP_ALLOW_WS=1 "
         f"{keep} --no-mlock --path /root/holder2 frost network serve --group {npub} --relay {relay_url} "
         f"--duress-beacon-pubkey {beacon_npub} --duress-beacon-salt {beacon_salt} --insecure-no-attestation"
+    )
+    # Fail fast if the duress serve crashes at startup (e.g. the credential does
+    # not derive the pinned beacon key) instead of surfacing only as the 180s
+    # freeze-wait timeout below. run_duress_serve prints this once it has detected
+    # duress and is about to publish.
+    holder2.wait_until_succeeds(
+        "journalctl -u holder2-duress.service --no-pager | grep -q 'Starting FROST coordination node'",
+        timeout=120,
     )
 
     # holder verifies the beacon and freezes; the freeze is persisted.
@@ -199,8 +216,12 @@ in
         f"{env} {keep} --no-mlock frost network duress-clear "
         f"--state-file /root/holder-duress.state initiate --delay-secs 3600"
     )
-    # execute trusts the wall clock; advance every node together (well past the 1h
-    # delay) so OPRF replay windows stay consistent across the quorum after the jump.
+    # execute trusts the wall clock; advance every node together so OPRF replay
+    # windows stay consistent across the quorum after the jump. The +2h jump must
+    # exceed BOTH keep constants it straddles: the 1h clear delay above (so execute
+    # is permitted) AND keep's 300s beacon freshness window (so the last relay-
+    # persisted beacon is stale by the time holder-cleared resubscribes and cannot
+    # re-freeze it). If keep ever raises either past 2h, bump this in step.
     for n in [relay, box, holder, holder2]:
         n.succeed("date -s '+2 hours'")
     holder.succeed(

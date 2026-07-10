@@ -27,7 +27,10 @@ in
   name = "keep-node-oprf-gate-2of3-test";
 
   # wisp is the production relay; use it (with NIP-42 auth) so the boot gate is
-  # exercised against the real relay, not a permissive stand-in.
+  # exercised against the real relay, not a permissive stand-in. Enforcement of
+  # that auth (an unauthenticated REQ is refused) is asserted by the oprf-unlock
+  # and duress-freeze tests against this same auth.required config; here the
+  # passing boot proves the gate speaks NIP-42 to reach the quorum.
   nodes.relay =
     { ... }:
     {
