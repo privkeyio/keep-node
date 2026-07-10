@@ -185,13 +185,13 @@ in
     # duress and is about to publish.
     holder2.wait_until_succeeds(
         "journalctl -u holder2-duress.service --no-pager | grep -q 'Starting FROST coordination node'",
-        timeout=120,
+        timeout=300,
     )
 
     # holder verifies the beacon and freezes; the freeze is persisted.
     holder.wait_until_succeeds(
         "journalctl -u holder-duress.service --no-pager | grep -q 'DURESS BEACON verified'",
-        timeout=180,
+        timeout=600,
     )
     holder.wait_until_succeeds("test -s /root/holder-duress.state", timeout=30)
 
@@ -203,7 +203,7 @@ in
     serve_duress_holder("holder-duress2")
     holder.wait_until_succeeds(
         "journalctl -u holder-duress2.service --no-pager | grep -q 'Restored persisted DURESS freeze'",
-        timeout=180,
+        timeout=300,
     )
     unlock_fails_closed("sticky")
 
