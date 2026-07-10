@@ -56,16 +56,16 @@
     "keep": {
       "flake": false,
       "locked": {
-        "lastModified": 1783477201,
-        "narHash": "sha256-V1DcTNSwsLoQ5rmaflC4lHmY0l1P9xPlqzKaI2FZ8bY=",
+        "lastModified": 1783661708,
+        "narHash": "sha256-j2VD6+LBCPV0yA7qpizYdIlpw+LZh0FIGgCY/CUTj1Y=",
         "owner": "privkeyio",
         "repo": "keep",
-        "rev": "8d7d3a4b5f9d72efac1d89a8494ca8cabf480a16",
+        "rev": "a34b64aca4ca56eed580565555fe78eed7b85eac",
         "type": "github"
       },
       "original": {
         "owner": "privkeyio",
-        "ref": "v0.5.0",
+        "ref": "v0.6.0",
         "repo": "keep",
         "type": "github"
       }

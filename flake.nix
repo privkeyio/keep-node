@@ -8,7 +8,7 @@
     # main-HEAD, so the appliance builds from a curated, known-good version rather than whatever main
     # happens to be; bump the tag to adopt a newer release deliberately.
     keep = {
-      url = "github:privkeyio/keep/v0.5.0";
+      url = "github:privkeyio/keep/v0.6.0";
       flake = false;
     };
     # nostr-vpn (`nvpn`): the node-to-node encrypted mesh transport (boringtun userspace WireGuard,
@@ -505,6 +505,7 @@
           _module.args = {
             keepCliPackage = keep-cli;
             inherit frostGroupFixture;
+            wispModule = wisp.nixosModules.wisp;
           };
         };
         oprf-gate-2of3 = pkgs.testers.runNixOSTest {
@@ -512,6 +513,14 @@
           _module.args = {
             keepCliPackage = keep-cli;
             frostGroupFixture = frostGroupFixture2of3;
+            wispModule = wisp.nixosModules.wisp;
+          };
+        };
+        duress-freeze = pkgs.testers.runNixOSTest {
+          imports = [ ./tests/duress-freeze.nix ];
+          _module.args = {
+            keepCliPackage = keep-cli;
+            wispModule = wisp.nixosModules.wisp;
           };
         };
         oprf-unlock = pkgs.testers.runNixOSTest {
