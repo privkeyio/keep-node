@@ -8,7 +8,7 @@
     # main-HEAD, so the appliance builds from a curated, known-good version rather than whatever main
     # happens to be; bump the tag to adopt a newer release deliberately.
     keep = {
-      url = "github:privkeyio/keep/v0.6.1";
+      url = "github:privkeyio/keep/v0.7.1";
       flake = false;
     };
     # nostr-vpn (`nvpn`): the node-to-node encrypted mesh transport (boringtun userspace WireGuard,

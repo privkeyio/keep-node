@@ -177,7 +177,8 @@ in
         f"systemd-run --unit=holder2-duress "
         f"--setenv=KEEP_PASSWORD={duress_cred} --setenv=KEEP_YES=1 --setenv=KEEP_ALLOW_WS=1 "
         f"{keep} --no-mlock --path /root/holder2 frost network serve --group {npub} --relay {relay_url} "
-        f"--duress-beacon-pubkey {beacon_npub} --duress-beacon-salt {beacon_salt} --insecure-no-attestation"
+        f"--duress-beacon-pubkey {beacon_npub} --duress-beacon-salt {beacon_salt} --group-total 3 "
+        f"--insecure-no-attestation"
     )
     # Fail fast if the duress serve crashes at startup (e.g. the credential does
     # not derive the pinned beacon key) instead of surfacing only as the 180s
@@ -188,23 +189,24 @@ in
         timeout=300,
     )
 
-    # holder verifies the beacon and freezes; the freeze is persisted.
-    holder.wait_until_succeeds(
-        "journalctl -u holder-duress.service --no-pager | grep -q 'DURESS BEACON verified'",
-        timeout=600,
-    )
-    holder.wait_until_succeeds("test -s /root/holder-duress.state", timeout=30)
+    # holder verifies the beacon and freezes. Gate on the sticky STATE FILE, which
+    # the freeze writes durably, not on a log line: keep suppresses INFO/WARN at the
+    # default RUST_LOG (unset here), so the "DURESS BEACON verified" log is invisible
+    # even though the freeze itself is correct. The state file appearing is the
+    # freeze's functional, log-independent marker (written in handle_gift_wrap right
+    # after the in-memory freeze is set).
+    holder.wait_until_succeeds("test -s /root/holder-duress.state", timeout=600)
 
     # === box + holder now fails closed: holder frozen -> below threshold, no key. ===
     unlock_fails_closed("frozen")
 
-    # === Sticky across restart: restart holder's serve -> it RESTORES the freeze. ===
+    # === Sticky across restart: restart holder's serve -> it RESTORES the freeze.
+    # serve_duress_holder waits for the "Listening for FROST messages" banner, and
+    # restore_duress_freeze runs BEFORE that banner in the same start, so the freeze
+    # is already re-applied once serve returns; unlock_fails_closed then proves it
+    # functionally. (No log grep: same default-RUST_LOG suppression as above.) ===
     holder.succeed("systemctl stop holder-duress.service")
     serve_duress_holder("holder-duress2")
-    holder.wait_until_succeeds(
-        "journalctl -u holder-duress2.service --no-pager | grep -q 'Restored persisted DURESS freeze'",
-        timeout=300,
-    )
     unlock_fails_closed("sticky")
 
     # === Operator clear (the coercion has ended). Stop holder2's duress serve
