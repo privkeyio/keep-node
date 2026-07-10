@@ -163,10 +163,22 @@ in
     beacon_salt = match_group1(r"Salt.*?([0-9a-f]{64})", prov, "beacon salt hex")
 
     # === Duress: holder serves pinned to holder2's beacon, with a sticky state file. ===
+    # DIAG: direct systemd-run with RUST_LOG so the CI log shows holder's event-
+    # handling path (beacon receipt / parse / verify).
     def serve_duress_holder(unit):
-        serve(
-            holder, unit,
-            extra=f"--duress-beacon-pin {beacon_npub} --duress-state-file /root/holder-duress.state",
+        holder.succeed(
+            f"systemd-run --unit={unit} "
+            f"--setenv=KEEP_PASSWORD=testpassword123 --setenv=KEEP_YES=1 --setenv=KEEP_ALLOW_WS=1 "
+            f"--setenv=KEEP_PEER_ANNOUNCE_INTERVAL_SECS=3 "
+            f"--setenv=RUST_LOG=info,keep_cli=debug,keep_frost_net=debug "
+            f"{keep} --no-mlock --path /root/holder frost network serve --group {npub} "
+            f"--relay {relay_url} --oprf-share-file /root/holder-oprf.share --oprf-dealer 1 "
+            f"--oprf-auto-approve --attestation-config /root/policy.toml "
+            f"--duress-beacon-pin {beacon_npub} --duress-state-file /root/holder-duress.state"
+        )
+        holder.wait_until_succeeds(
+            f"journalctl -u {unit}.service --no-pager | grep -q 'Listening for FROST messages'",
+            timeout=300,
         )
 
     serve_duress_holder("holder-duress")
@@ -176,6 +188,7 @@ in
     holder2.succeed(
         f"systemd-run --unit=holder2-duress "
         f"--setenv=KEEP_PASSWORD={duress_cred} --setenv=KEEP_YES=1 --setenv=KEEP_ALLOW_WS=1 "
+        f"--setenv=RUST_LOG=info,keep_cli=debug,keep_frost_net=debug "
         f"{keep} --no-mlock --path /root/holder2 frost network serve --group {npub} --relay {relay_url} "
         f"--duress-beacon-pubkey {beacon_npub} --duress-beacon-salt {beacon_salt} --insecure-no-attestation"
     )
