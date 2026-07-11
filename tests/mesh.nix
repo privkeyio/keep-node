@@ -99,8 +99,22 @@
       # The confinement is the whole point of this unit; assert the load-bearing directives are actually
       # in effect (and the daemon still peered above WHILE confined) so a refactor can't silently drop
       # them -- the daemon would keep forming the mesh either way, so the peering check alone won't catch it.
-      for prop in ["ProtectSystem=strict", "DevicePolicy=closed", "MemoryDenyWriteExecute=yes"]:
+      for prop in [
+          "ProtectSystem=strict",
+          "DevicePolicy=closed",
+          "MemoryDenyWriteExecute=yes",
+          "User=keep-node-mesh",
+      ]:
           nodeA.succeed(f"systemctl show keep-node-mesh.service | grep -qx '{prop}'")
+
+      # Load-bearing: the daemon actually RUNS as the non-root user (a regression to root, which still
+      # forms the mesh, must fail here). Read the real uid of the MainPID from /proc, so ambient
+      # CAP_NET_ADMIN + a non-zero uid is proven, not just the configured directive.
+      for node in [nodeA, nodeB]:
+          pid = node.succeed("systemctl show -p MainPID --value keep-node-mesh.service").strip()
+          assert pid != "0", "keep-node-mesh has no MainPID"
+          uid = node.succeed(f"awk '/^Uid:/{{print $2}}' /proc/{pid}/status").strip()
+          assert uid != "0", f"mesh daemon (pid {pid}) runs as uid {uid}, expected a non-root uid"
 
       # 6. Reach the peer over the TUNNEL (its deterministic 10.44.x.y mesh IP), not the underlay.
       meshB = nodeA.succeed(f"{H} nvpn ip --peer --discover-secs 0").strip().splitlines()[0].strip()
