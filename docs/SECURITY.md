@@ -103,15 +103,18 @@ so the box drops below the quorum threshold and no key is reconstructed, and the
 signed **duress beacon** to the rest of the group. Holders that have pinned that beacon key
 verify it and **freeze**: they refuse co-signing and OPRF evaluations, so the whole group fails
 closed rather than only the coerced node. The freeze is sticky across reboot, so a coerced
-holder cannot be quietly restarted back into service, and it lifts only through a **delayed,
-cancelable operator clear**, so an attacker who compels a "clear" still faces a waiting period
-in which a legitimate operator can abort it. This is a non-destructive alert-and-freeze: it
-wipes nothing and it is not a decoy.
+holder cannot be quietly restarted back into service. The in-band way to lift it is a **delayed,
+cancelable operator clear**, so an attacker who compels a "clear" still faces a waiting period in
+which a legitimate operator can abort it. The persisted freeze marker itself rests on filesystem
+permissions: it lives in a root-owned, non-writable directory, and that permission boundary, not
+the delay, is what stops an attacker from simply deleting the marker to resume service. This is a
+non-destructive alert-and-freeze: it wipes nothing and it is not a decoy.
 
-The beacon is metadata-private on the wire. It is a NIP-59 gift wrap, an ordinary `kind:1059`
-event authored by an ephemeral key, so an untrusted relay cannot read its contents, cannot tell
-it is a duress signal, and cannot recover the beacon key or the group from it. The honest
-limits, stated plainly because this is security-first and not a marketing claim:
+The beacon's *contents* are metadata-private on the wire. It is a NIP-59 gift wrap, an ordinary
+`kind:1059` event authored by an ephemeral key, so an untrusted relay cannot read its payload and
+cannot recover the beacon key, the group, or a duress label from it. What the encryption does not
+hide is the *shape* of the traffic, and the honest limits are stated plainly below because this is
+security-first and not a marketing claim:
 
 - **Traffic shape, not content, still leaks.** A relay that sees Nostr metadata can observe
   that `kind:1059` traffic is happening, its size, and its re-broadcast cadence, even though the
