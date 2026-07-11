@@ -166,9 +166,9 @@ geo split (the box + one remote holder), then add the third share.
 On the vault box, generate the threshold group and export one share per holder:
 
 ```bash
-keep frost generate -t 2 -s 3 --name g          # prints the group npub; the box keeps share 1
-keep frost export --share 2 --group <group-npub> # prints kshare2… for holder A (deliver out-of-band)
-keep frost export --share 3 --group <group-npub> # prints kshare3… for holder B (the remote box)
+keep frost generate -t 2 -s 3 --name g           # prints the group npub; generates all 3 shares
+keep frost export --share 2 --group <group-npub>  # prints a kshare… bech32 for holder A (out-of-band)
+keep frost export --share 3 --group <group-npub>  # prints a kshare… bech32 for holder B (the remote box)
 ```
 
 Deliver each `kshare…` to its holder over a channel you trust (it is share-level secret, below
@@ -176,17 +176,28 @@ threshold on its own but still sensitive), and import it there: `keep frost impo
 just a holder here , it does **not** need a TPM or the frost-gate; it needs `keep` and network reach to
 the coordination relay (next step).
 
+Then **delete the exported holder shares from the box** so a stolen box does not also carry them (the
+OPRF threshold protects the LUKS key regardless, but this keeps the box below threshold on its own for
+the FROST shares too, defense in depth):
+
+```bash
+keep frost delete-share --share 2 --group <group-npub>
+keep frost delete-share --share 3 --group <group-npub>   # the box retains only its own share 1
+```
+
 ### 5b , Choose the coordination relay (the one address every party must reach)
 
 The quorum coordinates over **one** Nostr relay that the box **and every holder** can reach. Across
 geos this is the crux, so choose deliberately:
 
 - **A relay both sites can reach (works today).** Point `keepNode.frostGate.relay` (and each holder's
-  `--relay`) at a `wss://` relay reachable from both locations , the box's on-box `wisp` exposed at a
-  routable `wss://` address (a reverse proxy terminating TLS in front of it), or another relay you
-  control. The relay only ever sees **ciphertext and traffic shape**, never plaintext or a share (it is
-  untrusted by design, see [Security](./SECURITY.md)); the residual it *can* observe is timing/size/kind
-  metadata. This is the recommended path for the first geo-distributed run.
+  `--relay`) at a `wss://` relay reachable from both locations. The on-box `keepNode.wisp` is *not* it
+  out of the box , it binds plaintext `7777` scoped to the mesh interface only, so reaching it off-mesh
+  means fronting it with a TLS-terminating reverse proxy at a routable `wss://` address (a real proxy +
+  firewall change, not a config toggle); otherwise use another `wss://` relay you control. The relay
+  only ever sees **ciphertext and traffic shape**, never plaintext or a share (it is untrusted by
+  design, see [Security](./SECURITY.md)); the residual it *can* observe is timing/size/kind metadata.
+  This is the recommended path for the first geo-distributed run.
 - **Over the on-box mesh `wisp` (most private, pending).** Riding the coordination inside the `nvpn`
   WireGuard mesh would hide even that traffic shape from any network observer, leaving only the relay
   host. It is **not wired yet**: `keep` rejects a raw mesh-IP relay URL (its SSRF guard refuses internal
