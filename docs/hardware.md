@@ -147,15 +147,94 @@ module and *booting* the UKI are two different moments , the reboot in step 4 is
 On an already-sealed box the Tier-1 recovery key is your way back in, both for the expected PCR-7 lockout
 above and for any misstep here.
 
-## Phase 5 (Tiers 3-4) , OPRF quorum + HA
+## Phase 5 (Tiers 3-4) , OPRF quorum (incl. geo-distributed holders) + HA
 
-- **OPRF (`mode = "oprf"`)** reconstructs the LUKS key from a 2-of-3 threshold at boot (this box + two
-  holders). It is only a meaningful *threshold* gate once measured boot (Tier 2) is on AND the holders
-  authenticate + gate requests , until then it is no stronger than `tpm` (see the `mode` option's
-  security note). The OPRF crypto path is proven in the `oprf-unlock` / `oprf-unlock-2of3` tests.
-- **Multi-node HA** wires `keepNode.vaultReplication` (role active/standby, shared JWT key, Litestream
-  WAL streaming, file replication) over the mesh between two boxes. See
-  [Multi-node sync](./multi-node-sync.md).
+**OPRF (`mode = "oprf"`)** reconstructs the LUKS key from a 2-of-3 threshold at boot (this box + two
+holders). It is only a meaningful *threshold* gate once measured boot (Tier 2) is on AND the holders
+authenticate + gate requests , until then it is no stronger than `tpm` (see the `mode` option's
+security note). The OPRF crypto path is proven in the `oprf-unlock` / `oprf-unlock-2of3` tests; this
+phase stands the same quorum up on metal, with **at least one holder in a different physical location**
+(the real target: a holder that a local theft of the box cannot also seize).
+
+Roles below: the **vault box** is this appliance (the FROST-gate dealer, runs `keepNode.frostGate` in
+`oprf` mode); a **holder** is any device , your phone, a laptop, or a second box at another site , that
+runs `keep frost network serve` and answers evaluations. Start with the smallest quorum that proves the
+geo split (the box + one remote holder), then add the third share.
+
+### 5a , Generate the group and hand out shares
+
+On the vault box, generate the threshold group and export one share per holder:
+
+```bash
+keep frost generate -t 2 -s 3 --name g          # prints the group npub; the box keeps share 1
+keep frost export --share 2 --group <group-npub> # prints kshare2… for holder A (deliver out-of-band)
+keep frost export --share 3 --group <group-npub> # prints kshare3… for holder B (the remote box)
+```
+
+Deliver each `kshare…` to its holder over a channel you trust (it is share-level secret, below
+threshold on its own but still sensitive), and import it there: `keep frost import`. The remote box is
+just a holder here , it does **not** need a TPM or the frost-gate; it needs `keep` and network reach to
+the coordination relay (next step).
+
+### 5b , Choose the coordination relay (the one address every party must reach)
+
+The quorum coordinates over **one** Nostr relay that the box **and every holder** can reach. Across
+geos this is the crux, so choose deliberately:
+
+- **A relay both sites can reach (works today).** Point `keepNode.frostGate.relay` (and each holder's
+  `--relay`) at a `wss://` relay reachable from both locations , the box's on-box `wisp` exposed at a
+  routable `wss://` address (a reverse proxy terminating TLS in front of it), or another relay you
+  control. The relay only ever sees **ciphertext and traffic shape**, never plaintext or a share (it is
+  untrusted by design, see [Security](./SECURITY.md)); the residual it *can* observe is timing/size/kind
+  metadata. This is the recommended path for the first geo-distributed run.
+- **Over the on-box mesh `wisp` (most private, pending).** Riding the coordination inside the `nvpn`
+  WireGuard mesh would hide even that traffic shape from any network observer, leaving only the relay
+  host. It is **not wired yet**: `keep` rejects a raw mesh-IP relay URL (its SSRF guard refuses internal
+  addresses) and the mesh has no name resolver yet, so there is no address to point `--relay` at. Wiring
+  this (a mesh-relay name via nvpn's `.fips` resolver, or an `allow-internal` build scoped to the mesh)
+  is the open transport-hardening step , settle it during this bring-up, not by guessing. Until then,
+  use the first option and accept the documented traffic-shape residual.
+
+Whatever you choose, **use `wss://`** off the mesh: plaintext `ws://` is test-only (the
+`allowInsecureWs` / `KEEP_ALLOW_WS` opt-ins) and exposes the coordination to an on-path attacker.
+
+### 5c , Bootstrap attestation (holders pin the box's TPM quote)
+
+Have the box announce its TPM quote and each holder TOFU-pin it, producing a `policy.toml` the holder
+serves under. This is what makes the oracle refuse an unattested requester (the security property that
+turns OPRF from "no stronger than tpm" into a real threshold). On each holder:
+
+```bash
+keep frost network attestation-provision --group <group-npub> --relay <relay> --out policy.toml --wait 60
+```
+
+### 5d , Provision the quorum (needs every holder online)
+
+With both holders serving (`keep frost network serve --group <group-npub> --relay <relay>
+--oprf-share-file <path> --oprf-dealer 1 --oprf-auto-approve --attestation-config policy.toml`), turn on
+`keepNode.frostGate` in `oprf` mode on the box and let its provision unit seal a share to every party.
+Provisioning **requires all three parties reachable at once** (it distributes a sealed share to each);
+after it, each holder reloads its newly sealed OPRF share and only the box + any **one** holder are
+needed to unlock.
+
+### 5e , Validate the threshold across a reboot and across the geo split
+
+- **Reboot with the remote holder online** , the box + the remote holder should reconstruct the key
+  and mount the vault unattended. This is the headline: a holder in another location gates the unlock.
+- **Reboot with every holder offline** , the gate must fail closed (no mapper, Vaultwarden down). This
+  proves the box alone is below threshold, i.e. stealing the box gets nothing.
+
+### 5f , Validate the duress path across geos (optional but recommended)
+
+Provision a duress credential and pin the remote holder to a beacon, then rehearse the coercion
+response end to end over the real network: entering the duress credential on one holder must **freeze**
+the pinned remote holder (co-signing + OPRF refused), survive a restart, and lift only via the delayed,
+cancelable operator clear. The mechanism and its honest ceiling are in [Security](./SECURITY.md); this
+is where you confirm the beacon actually reaches a holder in another location over the live relay.
+
+**Multi-node HA (Tier 4)** wires `keepNode.vaultReplication` (role active/standby, shared JWT key,
+Litestream WAL streaming, file replication) over the mesh between two boxes. See
+[Multi-node sync](./multi-node-sync.md).
 
 ## Gotchas
 
@@ -165,3 +244,24 @@ above and for any misstep here.
 - **Enroll Secure Boot keys before Secure Boot enforcement** , enabling it with only Microsoft's keys
   blocks the unsigned installer/UKI.
 - **Keep the Tier 1 recovery key** until you have a second node; a PCR change otherwise locks you out.
+
+### Multi-geo specific (Phase 5 with a remote holder)
+
+- **Sync every clock (NTP) before you coordinate.** Coordination events carry a timestamp and are
+  rejected outside a **300s replay window**, and anything more than **30s in the future** is refused
+  outright; the duress beacon's freshness rides the same window. Two boxes in different locations with
+  drifted clocks will see each other's announces/evaluations (and a duress beacon) as stale or
+  future-dated, and the quorum silently never converges. Enable NTP on every node and confirm
+  `timedatectl` agrees across sites before Phase 5.
+- **The mesh underlay needs a routable endpoint per node.** The `nvpn` mesh is UDP on the underlay, and
+  nvpn **refuses to advertise an RFC1918 address** (STUN/hole-punching is not wired). A box behind home
+  NAT (the remote holder's likely situation) must advertise a **routable** `selfEndpoint` , forward the
+  mesh listen port (default 51820/udp) on that site's router to the box, and set `selfEndpoint` to the
+  public `ip:port`. `discovery.enable` mode brokers *addresses* over a relay but still needs the
+  underlay itself reachable. If the mesh never reaches "peers connected", this is almost always it.
+- **Both sites must reach the same relay.** The quorum shares one coordination relay (Phase 5b); a
+  remote holder that cannot reach it simply never answers, and the box fails closed as if the holder
+  were offline. Verify reachability (`wss://` handshake) from *each* site before provisioning.
+- **The remote holder is a full trust-bearing party.** It holds a share and gates an unlock, so treat
+  its host with the same care as the box; a compromised holder is survivable (one share is below
+  threshold) but a compromised *majority* across sites is not.
