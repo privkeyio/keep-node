@@ -230,6 +230,24 @@ in
         assertion = cfg.identityDir == null || !lib.hasPrefix builtins.storeDir cfg.identityDir;
         message = "keepNode.mesh.identityDir (${toString cfg.identityDir}) is inside the Nix store: that copies the mesh Nostr secret key into the world-readable /nix/store. Deliver it out-of-band to a path on the target host (e.g. /run/secrets/... via agenix/sops), never as a Nix path literal.";
       }
+      {
+        # The daemon's ExecStartPre recursively chowns stateDir to the unprivileged keep-node-mesh user
+        # at EVERY start. If the vault volume (frostGate.dataDir) were nested under (or equal to) stateDir,
+        # that chown would transfer ownership of the ENTIRE vault (Vaultwarden data, the Litestream
+        # replica, sealed secrets) to the relay-facing mesh user, undoing this drop and handing a
+        # compromised daemon the vault. Mirror the frost-gate keepDbPath/creds disjointness guard: forbid
+        # dataDir from being at-or-under stateDir. (stateDir UNDER dataDir is fine, and is what a gated
+        # node uses; the prepare unit's runtime findmnt guard enforces the on-mapper placement.)
+        assertion =
+          let
+            norm = p: if lib.hasSuffix "/" p then p else p + "/";
+            dataDir = config.keepNode.frostGate.dataDir or null;
+          in
+          dataDir == null || !lib.hasPrefix (norm cfg.stateDir) (norm dataDir);
+        message = "keepNode.mesh.stateDir (${cfg.stateDir}) must not contain or equal keepNode.frostGate.dataDir (${
+          toString (config.keepNode.frostGate.dataDir or null)
+        }): the mesh daemon recursively chowns stateDir to the unprivileged keep-node-mesh user at every start, so nesting the vault volume under (or setting stateDir to) the vault dir would transfer ownership of the whole vault to that user. Keep stateDir a leaf dir (default /var/lib/keep-node-mesh, or a SUBDIRECTORY of dataDir on a gated node).";
+      }
     ];
 
     # Dedicated non-root identity the mesh daemon runs as, so a boringtun/Nostr RCE cannot read
