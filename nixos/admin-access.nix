@@ -92,6 +92,16 @@ in
         message = "keepNode.adminAccess.enable is true but neither keepNode.adminAccess.authorizedKeys (a usable inline key) nor authorizedKeysFile is set: SSH password auth is disabled, so this would permanently lock out remote access. Add an operator public key (or leave adminAccess off).";
       }
       {
+        # sshd honours only an ABSOLUTE AuthorizedKeysFile path; a relative or empty string is silently
+        # ignored, so a typo'd authorizedKeysFile satisfies the anti-lockout check above (it is non-null)
+        # yet provisions no key at all , the exact silent remote lockout the guard exists to prevent.
+        # Catch the path-typo class at build time; the runtime keep-node-admin-key-check unit below then
+        # covers the "absolute but absent/empty at boot" class the build cannot see.
+        assertion =
+          cfg.authorizedKeysFile == null || lib.hasPrefix "/" (lib.strings.trim cfg.authorizedKeysFile);
+        message = "keepNode.adminAccess.authorizedKeysFile (${toString cfg.authorizedKeysFile}) must be an ABSOLUTE path (starting with /): sshd silently ignores a relative or empty AuthorizedKeysFile, which would provision no admin key and permanently lock out remote access. Use an absolute path like /etc/keepnode/admin_authorized_keys.";
+      }
+      {
         # The mesh-only perimeter is enforced by an interface-scoped firewall rule below; if the firewall
         # is off, that rule does nothing and sshd is reachable from the LAN/underlay. firewall.enable is
         # only mkDefault true, so a host can silently turn it off.
@@ -142,6 +152,47 @@ in
         ];
       }
     ];
+
+    # Runtime anti-lockout backstop for what the build cannot see: an authorizedKeysFile that is a valid
+    # absolute path (so the assertions pass) but is ABSENT or EMPTY at boot , a failed installer
+    # enrollment, an un-provisioned runtime file, or a deleted key , leaves keepadmin with zero usable
+    # keys and, with password auth off, NO way in over the network. That would otherwise be a silent
+    # brick. This oneshot checks the effective key sources at boot and, if none holds a usable key, fails
+    # loudly: a console message an operator sees on the physical box, and a `systemctl --failed` entry.
+    # Nothing requires this unit, so its failure surfaces the lockout WITHOUT blocking boot or sshd.
+    systemd.services.keep-node-admin-key-check = {
+      description = "Anti-lockout: fail loudly if keepadmin has no authorized SSH key";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "local-fs.target" ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+      };
+      script = ''
+        present=0
+        # The inline `authorizedKeys` land in the Nix-managed per-user file; the runtime
+        # authorizedKeysFile (when configured) is the installer/operator-provisioned path.
+        for f in /etc/ssh/authorized_keys.d/keepadmin ${
+          lib.optionalString (cfg.authorizedKeysFile != null) (lib.escapeShellArg cfg.authorizedKeysFile)
+        }; do
+          # A usable key is any non-blank, non-comment line.
+          if [ -f "$f" ] && grep -qE '^[[:space:]]*[^#[:space:]]' "$f" 2>/dev/null; then
+            present=1
+          fi
+        done
+        if [ "$present" -eq 0 ]; then
+          msg="KEEP NODE ANTI-LOCKOUT: keepadmin has NO authorized SSH key (inline keys empty${
+            lib.optionalString (cfg.authorizedKeysFile != null) " and ${cfg.authorizedKeysFile} is absent/empty"
+          }). Key-only SSH means remote access is IMPOSSIBLE. Provision an admin public key (keepNode.adminAccess.authorizedKeys${
+            lib.optionalString (cfg.authorizedKeysFile != null) " or ${cfg.authorizedKeysFile}"
+          }), then: systemctl restart keep-node-admin-key-check.service"
+          echo "$msg" > /dev/console 2>/dev/null || true
+          echo "$msg" >&2
+          exit 1
+        fi
+        echo "keepadmin has at least one authorized SSH key"
+      '';
+    };
 
     services.openssh = {
       enable = true;

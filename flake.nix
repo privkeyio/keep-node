@@ -365,6 +365,17 @@
         && (adminAccessToplevelEvals {
           authorizedKeys = [ ];
           authorizedKeysFile = "/run/keys/admin_authorized_keys";
+        }).success
+        # A RELATIVE-path authorizedKeysFile is REFUSED (a distinct absolute-path guard): sshd silently
+        # ignores a non-absolute AuthorizedKeysFile, so a path typo would satisfy the non-null anti-lockout
+        # check above yet provision no key , the same silent remote lockout. An empty string is refused too.
+        && !(adminAccessToplevelEvals {
+          authorizedKeys = [ ];
+          authorizedKeysFile = "run/keys/admin_authorized_keys";
+        }).success
+        && !(adminAccessToplevelEvals {
+          authorizedKeys = [ ];
+          authorizedKeysFile = "";
         }).success;
 
       # Pure-eval guard for the mesh-interface single source of truth: setting keepNode.mesh.interface

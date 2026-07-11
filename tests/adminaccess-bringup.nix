@@ -36,10 +36,20 @@ in
       start_all()
       box.wait_for_unit("sshd.service")
 
+      # Anti-lockout runtime backstop: at boot the runtime authorizedKeysFile is not provisioned yet, so
+      # keepadmin has NO usable key. The check unit must FAIL loudly (surfacing the otherwise-silent
+      # lockout) and log the alert. Nothing requires it, so boot and sshd are unaffected (asserted below).
+      box.wait_until_succeeds("systemctl is-failed --quiet keep-node-admin-key-check.service")
+      box.succeed("journalctl -u keep-node-admin-key-check.service --no-pager | grep -q 'ANTI-LOCKOUT'")
+
       # Simulate install-keepnode enrolling the operator key into the mutable runtime file post-install.
       box.succeed("install -d -m 0755 /etc/keepnode")
       box.succeed("install -m 0644 ${adminKeyFixture}/id.pub ${keysFile}")
       box.succeed("install -m 0600 ${adminKeyFixture}/id /root/id")
+
+      # With a usable key now present, the check passes , no false alarm on a valid config.
+      box.succeed("systemctl restart keep-node-admin-key-check.service")
+      box.succeed("systemctl is-active --quiet keep-node-admin-key-check.service")
 
       ssh = (
           "ssh -i /root/id -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
