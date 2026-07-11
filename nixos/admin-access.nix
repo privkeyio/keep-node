@@ -97,8 +97,10 @@ in
         # yet provisions no key at all , the exact silent remote lockout the guard exists to prevent.
         # Catch the path-typo class at build time; the runtime keep-node-admin-key-check unit below then
         # covers the "absolute but absent/empty at boot" class the build cannot see.
-        assertion =
-          cfg.authorizedKeysFile == null || lib.hasPrefix "/" (lib.strings.trim cfg.authorizedKeysFile);
+        # Check the RAW value (not trimmed): sshd and the runtime check both use it untrimmed, so a
+        # leading-whitespace path like "  /etc/foo" must be rejected here rather than pass and then be
+        # stat'd literally (and false-alarm) at boot.
+        assertion = cfg.authorizedKeysFile == null || lib.hasPrefix "/" cfg.authorizedKeysFile;
         message = "keepNode.adminAccess.authorizedKeysFile (${toString cfg.authorizedKeysFile}) must be an ABSOLUTE path (starting with /): sshd silently ignores a relative or empty AuthorizedKeysFile, which would provision no admin key and permanently lock out remote access. Use an absolute path like /etc/keepnode/admin_authorized_keys.";
       }
       {
@@ -170,10 +172,17 @@ in
       };
       script = ''
         present=0
+        # Bind the runtime file path to a shell VARIABLE via escapeShellArg, then reference it only as
+        # "$akf". The path is operator config, but embedding it raw in a double-quoted string would let a
+        # value containing $(...) or a backtick run as root at boot; a shell variable's contents are never
+        # re-scanned for command substitution, so this stays safe on any path.
+        ${lib.optionalString (
+          cfg.authorizedKeysFile != null
+        ) "akf=${lib.escapeShellArg (toString cfg.authorizedKeysFile)}"}
         # The inline `authorizedKeys` land in the Nix-managed per-user file; the runtime
         # authorizedKeysFile (when configured) is the installer/operator-provisioned path.
         for f in /etc/ssh/authorized_keys.d/keepadmin ${
-          lib.optionalString (cfg.authorizedKeysFile != null) (lib.escapeShellArg cfg.authorizedKeysFile)
+          lib.optionalString (cfg.authorizedKeysFile != null) ''"$akf"''
         }; do
           # A usable key is any non-blank, non-comment line.
           if [ -f "$f" ] && grep -qE '^[[:space:]]*[^#[:space:]]' "$f" 2>/dev/null; then
@@ -182,9 +191,9 @@ in
         done
         if [ "$present" -eq 0 ]; then
           msg="KEEP NODE ANTI-LOCKOUT: keepadmin has NO authorized SSH key (inline keys empty${
-            lib.optionalString (cfg.authorizedKeysFile != null) " and ${cfg.authorizedKeysFile} is absent/empty"
+            lib.optionalString (cfg.authorizedKeysFile != null) "and $akf is absent/empty"
           }). Key-only SSH means remote access is IMPOSSIBLE. Provision an admin public key (keepNode.adminAccess.authorizedKeys${
-            lib.optionalString (cfg.authorizedKeysFile != null) " or ${cfg.authorizedKeysFile}"
+            lib.optionalString (cfg.authorizedKeysFile != null) "or $akf"
           }), then: systemctl restart keep-node-admin-key-check.service"
           echo "$msg" > /dev/console 2>/dev/null || true
           echo "$msg" >&2
