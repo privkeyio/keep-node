@@ -230,7 +230,36 @@ in
         assertion = cfg.identityDir == null || !lib.hasPrefix builtins.storeDir cfg.identityDir;
         message = "keepNode.mesh.identityDir (${toString cfg.identityDir}) is inside the Nix store: that copies the mesh Nostr secret key into the world-readable /nix/store. Deliver it out-of-band to a path on the target host (e.g. /run/secrets/... via agenix/sops), never as a Nix path literal.";
       }
+      {
+        # The daemon's ExecStartPre recursively chowns stateDir to the unprivileged keep-node-mesh user
+        # at EVERY start. If the vault volume (frostGate.dataDir) were nested under (or equal to) stateDir,
+        # that chown would transfer ownership of the ENTIRE vault (Vaultwarden data, the Litestream
+        # replica, sealed secrets) to the relay-facing mesh user, undoing this drop and handing a
+        # compromised daemon the vault. Mirror the frost-gate keepDbPath/creds disjointness guard: forbid
+        # dataDir from being at-or-under stateDir. (stateDir UNDER dataDir is fine, and is what a gated
+        # node uses; the prepare unit's runtime findmnt guard enforces the on-mapper placement.)
+        assertion =
+          let
+            norm = p: if lib.hasSuffix "/" p then p else p + "/";
+            dataDir = config.keepNode.frostGate.dataDir or null;
+          in
+          dataDir == null || !lib.hasPrefix (norm cfg.stateDir) (norm dataDir);
+        message = "keepNode.mesh.stateDir (${cfg.stateDir}) must not contain or equal keepNode.frostGate.dataDir (${
+          toString (config.keepNode.frostGate.dataDir or null)
+        }): the mesh daemon recursively chowns stateDir to the unprivileged keep-node-mesh user at every start, so nesting the vault volume under (or setting stateDir to) the vault dir would transfer ownership of the whole vault to that user. Keep stateDir a leaf dir (default /var/lib/keep-node-mesh, or a SUBDIRECTORY of dataDir on a gated node).";
+      }
     ];
+
+    # Dedicated non-root identity the mesh daemon runs as, so a boringtun/Nostr RCE cannot read
+    # root-owned secrets on disk. A FIXED system user (not DynamicUser): the identity dir persists on
+    # the encrypted volume across boots and must keep a stable owner, and StateDirectory cannot express
+    # the LUKS-mapper placement the prepare unit's guard requires.
+    users.users.keep-node-mesh = {
+      isSystemUser = true;
+      group = "keep-node-mesh";
+      description = "keep-node nvpn mesh daemon";
+    };
+    users.groups.keep-node-mesh = { };
 
     # boringtun is a userspace WireGuard: the daemon opens /dev/net/tun (generic tun module) and needs
     # CAP_NET_ADMIN, never a kernel wg module. Ensure tun is loadable.
@@ -245,7 +274,9 @@ in
     # Ungated: pre-create the identity dir on the (plain) root fs. Gated: DO NOT create it here, since
     # tmpfiles runs at early boot before the FROST volume is mounted and would land it on the
     # unencrypted disk; keep-node-mesh-prepare creates it on the mounted encrypted volume instead.
-    systemd.tmpfiles.rules = lib.optionals (!gateEnabled) [ "d ${cfg.stateDir} 0700 root root -" ];
+    systemd.tmpfiles.rules = lib.optionals (!gateEnabled) [
+      "d ${cfg.stateDir} 0700 keep-node-mesh keep-node-mesh -"
+    ];
 
     # Provision the mesh identity (+ the declarative roster). Runs on a gated node (to place the key on
     # the encrypted volume, fail-closed) and/or when `peers` is set (declarative onboarding), before the
@@ -378,10 +409,23 @@ in
       # The daemon shells out to `ip` (iproute2) to configure its userspace-WireGuard tun interface
       # and routes; without it on PATH, tunnel setup fails with ENOENT.
       path = [ pkgs.iproute2 ];
-      # The daemon still runs as root (opening /dev/net/tun needs it here), but its filesystem blast
-      # radius is locked down below; dropping to a dedicated non-root User= is the remaining hardening
-      # step (blocked on making /dev/net/tun reachable without uid 0).
+      # Runs as a dedicated NON-root user. Opening /dev/net/tun needs CAP_NET_ADMIN, not uid 0
+      # (the device is mode 0666 and boringtun's TUNSETIFF only needs the capability, which is granted
+      # ambiently below and survives exec into `ip`), so the daemon , which parses hostile
+      # WireGuard/Nostr traffic , holds no ability to READ other root-owned secrets on disk (DAC denies
+      # it), closing the confidentiality gap that ProtectSystem alone could not. Same pattern as the
+      # userspace-tun VPN units in nixpkgs (geph, firezone, lokinet).
       serviceConfig = {
+        User = "keep-node-mesh";
+        Group = "keep-node-mesh";
+        # CAP_NET_ADMIN must act on the HOST network namespace and real tun device, so do not let a
+        # user namespace shadow it (nixpkgs geph/firezone set this explicitly for the same reason).
+        PrivateUsers = false;
+        # The identity dir is created by root , the prepare unit (gated/declarative) or a manual
+        # `nvpn init` , so hand it to the daemon user at every start. `+` runs this as root regardless
+        # of User= above; it is idempotent and covers all onboarding paths without weakening the
+        # prepare unit's encrypted-volume placement guard.
+        ExecStartPre = "+${pkgs.coreutils}/bin/chown -R keep-node-mesh:keep-node-mesh ${cfg.stateDir}";
         ExecStart = "${lib.getExe cfg.package} connect";
         # nvpn reads $HOME/.config/nvpn/config.toml.
         Environment = "HOME=${cfg.stateDir}";
@@ -398,13 +442,11 @@ in
         # bug in boringtun must not be able to write arbitrary files or tamper with the rest of the box.
         # ProtectSystem=strict makes the whole fs read-only except ReadWritePaths (only the mesh
         # identity dir); ProtectHome hides /root and /home; PrivateTmp isolates /tmp. The tun device is
-        # allow-listed explicitly (DevicePolicy=closed denies all other device nodes). This is
-        # write/integrity confinement, NOT confidentiality: while still running as root the daemon can
-        # READ any other root-readable secret on disk (ProtectSystem only remounts read-only, it hides
-        # nothing beyond /root and /home) -- closing that read gap is the job of the deferred non-root
-        # User= drop, under which DAC alone denies a compromised daemon those root-owned key files. A
-        # later host-DNS increment (nvpn's `.fips` resolver writes /etc/systemd/resolved.conf.d) will
-        # also need those /etc paths added here; the static relay-less mesh in this increment does not.
+        # allow-listed explicitly (DevicePolicy=closed denies all other device nodes). With the non-root
+        # User= above this now also confines CONFIDENTIALITY: DAC alone denies a compromised daemon the
+        # root-owned key files ProtectSystem left readable (it only remounts read-only). A later
+        # host-DNS increment (nvpn's `.fips` resolver writes /etc/systemd/resolved.conf.d) will need
+        # those /etc paths added here; the static relay-less mesh in this increment does not.
         ProtectSystem = "strict";
         ProtectHome = true;
         PrivateTmp = true;
