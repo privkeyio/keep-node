@@ -107,11 +107,18 @@ distinct from the signing sessions, described in the next chapter.
 
 Nostr coordination (FROST, the bunker, the unlock session, peer discovery) needs a relay. Keep Node
 bundles `wisp`, privkey's own lightweight Nostr relay, so a deployment does not depend on third-party
-public relays. It is the relay the threshold-OPRF quorum actually coordinates over: the `oprf-unlock`
+public relays. It is the relay the threshold-OPRF quorum is meant to coordinate over: the `oprf-unlock`
 tests run the real `keep` quorum against wisp (dogfooding it in place of a stand-in relay), including
 with **NIP-42 authentication required** , `keep` authenticates automatically and an unauthenticated
 client is refused. Run on-box via the opt-in `keepNode.wisp` module, it binds to the mesh interface
 only, so it is reachable over the encrypted mesh and refused on the LAN/underlay.
+
+The OPRF and duress relay endpoint is operator-configured (`keepNode.frostGate.relay`) rather than
+defaulted, so an operator should point it at this on-box mesh wisp to keep the quorum's coordination
+inside the WireGuard mesh. When it is, a network observer sees only WireGuard and only the relay host
+sees Nostr metadata; when it is aimed at an off-mesh relay instead, that relay (still untrusted for
+content) also sees the coordination traffic's shape. Binding this default to the mesh is a planned
+hardening step.
 
 The relay is untrusted infrastructure: it stores and forwards
 ciphertext only, never plaintext, and holds at most one key share, below the quorum
