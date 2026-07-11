@@ -4,7 +4,6 @@
 {
   config,
   lib,
-  pkgs,
   ...
 }:
 let
@@ -81,7 +80,8 @@ in
         File holding the SHARED cluster keep identity (an `nsec1...` bech32 or 64-char hex secret) that
         all nodes replicate under (KEEP_STATE_IDENTITY). Generate it once for the cluster and deliver the SAME bytes to every
         node out-of-band (like the shared Vaultwarden JWT key). Must be a runtime path, not a Nix
-        store path. Delivered via a systemd credential and exported into the daemon's environment.
+        store path. Delivered via a systemd credential and read by keep-web from its `KEEP_STATE_IDENTITY_FILE`
+        path; the nsec value never enters the process environment.
       '';
     };
 
@@ -115,7 +115,8 @@ in
         this node first creates its vault. Every cluster node seeds the SAME data key so a standby can
         decrypt the records the active replicates. Deliver the same bytes to every node out-of-band onto
         the encrypted volume (like rsaKeyFile / stateIdentityFile). Must be a runtime path, not a Nix
-        store path. Delivered via a systemd credential and exported into the daemon's environment.
+        store path. Delivered via a systemd credential and read by keep-web from its `KEEP_STORAGE_KEY_FILE`
+        path; the key value never enters the process environment.
       '';
     };
   };
@@ -180,37 +181,28 @@ in
         KEEP_WEB_AUTH_TOKEN_FILE = "%d/authtoken";
       }
       // lib.optionalAttrs (cfg.stateRelay != null) {
-        # KEEP_STATE_IDENTITY is exported by the ExecStart wrapper from the credential, not here, so the
-        # nsec never sits in the unit's declarative environment.
         KEEP_STATE_RELAY = cfg.stateRelay;
         KEEP_STATE_ROLE = cfg.stateRole;
+      }
+      // lib.optionalAttrs (cfg.stateIdentityFile != null) {
+        # Pass the cluster nsec by FILE PATH (like KEEP_PASSWORD_FILE / KEEP_WEB_AUTH_TOKEN_FILE
+        # above), so keep-web reads the secret from its 0400 credential and the nsec value never
+        # enters the process environment (readable via /proc/<pid>/environ, inherited by children,
+        # and surfaceable in core dumps).
+        KEEP_STATE_IDENTITY_FILE = "%d/stateidentity";
+      }
+      // lib.optionalAttrs (cfg.storageKeyFile != null) {
+        # Same file-path delivery for the shared vault data key; the raw key never enters the env.
+        KEEP_STORAGE_KEY_FILE = "%d/storagekey";
       }
       // lib.optionalAttrs (cfg.allowInsecureWs && cfg.stateRelay != null) {
         KEEP_ALLOW_WS = "1";
       };
       serviceConfig = {
-        # When keep-state replication is on, wrap the daemon so its cluster secrets are read from 0400
-        # credential files into the environment at start (keep-web reads them from env), rather than
-        # placing the nsec / vault key in the declarative unit environment.
-        ExecStart =
-          let
-            exports = lib.concatStringsSep "\n" (
-              lib.optional (
-                cfg.stateIdentityFile != null
-              ) ''export KEEP_STATE_IDENTITY="$(cat "$CREDENTIALS_DIRECTORY/stateidentity")"''
-              ++ lib.optional (
-                cfg.storageKeyFile != null
-              ) ''export KEEP_STORAGE_KEY="$(cat "$CREDENTIALS_DIRECTORY/storagekey")"''
-            );
-          in
-          if exports != "" then
-            pkgs.writeShellScript "keep-web-start" ''
-              set -euo pipefail
-              ${exports}
-              exec ${lib.getExe cfg.package}
-            ''
-          else
-            lib.getExe cfg.package;
+        # keep-web reads every operator secret from its `*_FILE` credential path (password, auth
+        # token, cluster nsec, vault data key), so no wrapper is needed to marshal secrets into the
+        # environment; the raw values stay in their 0400 credential files and out of /proc/environ.
+        ExecStart = lib.getExe cfg.package;
         DynamicUser = true;
         # Create the writable parent; keep-web creates the vault subdir (cfg.path) itself.
         StateDirectory = "keep-node";
