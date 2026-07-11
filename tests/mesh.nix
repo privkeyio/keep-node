@@ -20,6 +20,10 @@
       keepNode.mesh = {
         enable = true;
         package = nvpnPackage;
+        # A NON-default name (nvpn's Linux default is utun100): the daemon must create THIS device, not
+        # its default, proving keepNode.mesh.interface is wired into `nvpn connect --iface` and so cannot
+        # drift from the mesh-scoped firewall rules.
+        interface = "utun77";
       };
     };
   nodes.nodeB =
@@ -29,6 +33,7 @@
       keepNode.mesh = {
         enable = true;
         package = nvpnPackage;
+        interface = "utun77";
       };
     };
 
@@ -41,6 +46,7 @@
       ipB = nodes.nodeB.networking.primaryIPAddress;
       port = toString nodes.nodeA.keepNode.mesh.listenPort;
       stateDir = nodes.nodeA.keepNode.mesh.stateDir;
+      meshIface = nodes.nodeA.keepNode.mesh.interface;
     in
     ''
       start_all()
@@ -115,6 +121,13 @@
           assert pid != "0", "keep-node-mesh has no MainPID"
           uid = node.succeed(f"awk '/^Uid:/{{print $2}}' /proc/{pid}/status").strip()
           assert uid != "0", f"mesh daemon (pid {pid}) runs as uid {uid}, expected a non-root uid"
+
+      # The daemon created the CONFIGURED (non-default) interface, not nvpn's utun100 default: proof
+      # keepNode.mesh.interface is wired into `nvpn connect --iface`, so the firewall's mesh-scoped
+      # rules can never target a device nvpn didn't bring up.
+      for node in [nodeA, nodeB]:
+          node.succeed("ip link show ${meshIface}")
+          node.fail("ip link show utun100")
 
       # 6. Reach the peer over the TUNNEL (its deterministic 10.44.x.y mesh IP), not the underlay.
       meshB = nodeA.succeed(f"{H} nvpn ip --peer --discover-secs 0").strip().splitlines()[0].strip()

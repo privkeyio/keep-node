@@ -426,7 +426,12 @@ in
         # of User= above; it is idempotent and covers all onboarding paths without weakening the
         # prepare unit's encrypted-volume placement guard.
         ExecStartPre = "+${pkgs.coreutils}/bin/chown -R keep-node-mesh:keep-node-mesh ${cfg.stateDir}";
-        ExecStart = "${lib.getExe cfg.package} connect";
+        # Pass the tun device name explicitly so nvpn creates exactly the interface the mesh-scoped
+        # firewall rules (wisp, admin-SSH, vault-replication) are opened on. Without this, `connect`
+        # falls back to nvpn's built-in default (utun100 on Linux), which only matches
+        # keepNode.mesh.interface by coincidence: an operator who changes the interface would scope every
+        # mesh service's port to a device nvpn never creates, silently breaking the mesh-only perimeter.
+        ExecStart = "${lib.getExe cfg.package} connect --iface ${lib.escapeShellArg cfg.interface}";
         # nvpn reads $HOME/.config/nvpn/config.toml.
         Environment = "HOME=${cfg.stateDir}";
         Restart = "on-failure";

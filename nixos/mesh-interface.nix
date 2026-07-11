@@ -13,19 +13,24 @@
     description = ''
       The nvpn mesh tun device. Mesh-scoped services (wisp relay, vault-replication receiver, admin
       SSH) open their port only on this interface, so the LAN and the WireGuard underlay never reach
-      them; it must match nvpn's runtime device. Set it here once; the per-service
-      `keepNode.{wisp,adminAccess,vaultReplication.meshReplication}.meshInterface` options each default
-      to it, so they cannot drift apart unless deliberately overridden.
+      them. This name is passed to the daemon (`nvpn connect --iface`), so nvpn creates exactly this
+      device , the firewall scoping and the runtime interface cannot drift apart. Set it here once; the
+      per-service `keepNode.{wisp,adminAccess,vaultReplication.meshReplication}.meshInterface` options
+      each default to it, so they stay consistent unless deliberately overridden.
     '';
   };
 
-  # An empty or whitespace-only name scopes every mesh service's firewall port to interface "" at once,
-  # which can fail the firewall apply and fall open to the LAN/underlay. Consolidation turns one typo
-  # into a three-service mis-scope, so refuse it here (mirrors the lanBringupInterface guard).
+  # The name is both a firewall attr key (scoping the wisp, admin-SSH, and vault-replication ports) AND
+  # the device nvpn creates via `--iface`, so constrain it to a valid Linux interface name (IFNAMSIZ 15,
+  # leading letter). The leading letter is load-bearing beyond rejecting empty/whitespace: a PURELY
+  # NUMERIC name makes boringtun's TunSocket parse it as a pre-opened file descriptor instead of creating
+  # a device, so nvpn would bring up NO interface by that name while the firewall still scopes every mesh
+  # port to it , the exact silent, fail-closed drift this consolidation exists to prevent. (Over-length
+  # or whitespace names fail loudly at daemon start; the numeric case is the only silent one.)
   config.assertions = [
     {
-      assertion = lib.strings.trim config.keepNode.mesh.interface != "";
-      message = "keepNode.mesh.interface must be a non-empty interface name: it scopes the wisp, admin-SSH, and vault-replication firewall ports, and an empty value mis-scopes all three at once.";
+      assertion = builtins.match "[a-zA-Z][a-zA-Z0-9._-]{0,14}" config.keepNode.mesh.interface != null;
+      message = "keepNode.mesh.interface (${config.keepNode.mesh.interface}) must be a valid Linux interface name: a letter followed by up to 14 of [A-Za-z0-9._-] (IFNAMSIZ 15). It scopes the wisp, admin-SSH, and vault-replication firewall ports and is the device nvpn creates via --iface; an empty, whitespace, over-long, or purely-numeric name mis-scopes those ports or (numeric) makes boringtun treat it as a file descriptor so no device is created. Use e.g. utun100.";
     }
   ];
 }
