@@ -665,6 +665,12 @@
             inherit vaultRsaKeyFixture;
           };
         };
+        # The UEFI installer ISO an operator flashes to bring up a box (docs/hardware.md: `nix build
+        # .#installer-iso` -> dd to USB). It is a shipped artifact but was not gated by CI, so a module
+        # change or keep bump could silently break the one image the hardware bring-up depends on, found
+        # only when flashing on the day. Building it here (same expression as packages.installer-iso)
+        # catches that on push-to-main / full-ci; it is excluded from the per-PR fast subset.
+        installer-iso = installerSystem.config.system.build.isoImage;
       };
 
       devShells.${system}.default = pkgs.mkShell {
