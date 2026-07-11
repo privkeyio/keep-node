@@ -80,7 +80,8 @@ in
         File holding the SHARED cluster keep identity (an `nsec1...` bech32 or 64-char hex secret) that
         all nodes replicate under (KEEP_STATE_IDENTITY). Generate it once for the cluster and deliver the SAME bytes to every
         node out-of-band (like the shared Vaultwarden JWT key). Must be a runtime path, not a Nix
-        store path. Delivered via a systemd credential and exported into the daemon's environment.
+        store path. Delivered via a systemd credential and read by keep-web from its `KEEP_STATE_IDENTITY_FILE`
+        path; the nsec value never enters the process environment.
       '';
     };
 
@@ -114,7 +115,8 @@ in
         this node first creates its vault. Every cluster node seeds the SAME data key so a standby can
         decrypt the records the active replicates. Deliver the same bytes to every node out-of-band onto
         the encrypted volume (like rsaKeyFile / stateIdentityFile). Must be a runtime path, not a Nix
-        store path. Delivered via a systemd credential and exported into the daemon's environment.
+        store path. Delivered via a systemd credential and read by keep-web from its `KEEP_STORAGE_KEY_FILE`
+        path; the key value never enters the process environment.
       '';
     };
   };
