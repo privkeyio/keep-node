@@ -91,14 +91,55 @@ Node does not claim to.
 
 ### Duress and coercion
 
-The quorum protects against theft and remote compromise, not against an attacker who coerces
-a present, cooperating user: a user forced to unlock can be forced to do so with the real
-quorum. For that threat the underlying `keep-core` carries a hidden-volume primitive
-(`keep_core::hidden`): a vault can hold a second storage area that is cryptographically
-indistinguishable from random padding, so unlocking with a decoy credential reveals only the
-decoy contents and the existence of the hidden area cannot be proven. Keep Node does not yet
-expose a decoy-credential flow on top of this primitive; wiring a duress/decoy unlock into
-the appliance is future work, and until it ships Keep Node makes no duress claim.
+The quorum protects against theft and remote compromise. It does not, on its own, protect
+against an attacker who coerces a present, cooperating user into unlocking with the *real*
+credential: that user can be forced to drive the real quorum, and Keep Node does not claim to
+stop it.
+
+For that threat Keep Node ships an opt-in **coercion response**. A holder provisions a duress
+credential, chosen distinct from the real vault password. Entering the duress credential at
+`serve` fails closed: the vault is never unlocked and the holder's OPRF share is never loaded,
+so the box drops below the quorum threshold and no key is reconstructed, and the holder emits a
+signed **duress beacon** to the rest of the group. Holders that have pinned that beacon key
+verify it and **freeze**: they refuse co-signing and OPRF evaluations, so the whole group fails
+closed rather than only the coerced node. The freeze is sticky across reboot, so a coerced
+holder cannot be quietly restarted back into service. The in-band way to lift it is a **delayed,
+cancelable operator clear**, so an attacker who compels a "clear" still faces a waiting period in
+which a legitimate operator can abort it. The persisted freeze marker itself rests on filesystem
+permissions: it lives in a root-owned, non-writable directory, and that permission boundary, not
+the delay, is what stops an attacker from simply deleting the marker to resume service. This is a
+non-destructive alert-and-freeze: it wipes nothing and it is not a decoy.
+
+The beacon's *contents* are metadata-private on the wire. It is a NIP-59 gift wrap, an ordinary
+`kind:1059` event authored by an ephemeral key, so an untrusted relay cannot read its payload and
+cannot recover the beacon key, the group, or a duress label from it. What the encryption does not
+hide is the *shape* of the traffic, and the honest limits are stated plainly below because this is
+security-first and not a marketing claim:
+
+- **Traffic shape, not content, still leaks.** A relay that sees Nostr metadata can observe
+  that `kind:1059` traffic is happening, its size, and its re-broadcast cadence, even though the
+  content stays encrypted. Shaping that traffic to be indistinguishable from cover traffic is
+  tracked future work. Carrying the OPRF and duress coordination over the on-box `nvpn` mesh
+  (WireGuard) already hides it from any *network* observer, leaving only the relay host.
+- **Availability is not guaranteed; failing closed is.** An *active* relay that drops or delays
+  the beacon can keep other holders from freezing. This is the same "a compromised relay
+  degrades availability" caveat that applies to all relay traffic here. The beacon re-broadcasts,
+  and a frozen quorum is the safe state, but delivery against a censoring relay is not promised.
+- **The beacon pin is a shared secret of modest strength.** Every holder must hold the pin to
+  act on it, and the beacon key derives from a possibly low-entropy duress credential, hardened
+  with Argon2id but not unbreakable. A leaked pin lets an attacker grind the credential offline
+  and forge a freeze: a denial of service on availability, never a path to the key. Hardening
+  this beyond a grindable key is tracked work.
+- **It does not defend a user coerced into the real unlock.** Duress is something the user opts
+  into by entering the duress credential; it does nothing against a coercer who already knows the
+  real credential and watches the user use it.
+
+Separately, for concealing *that a second vault exists at all*, the underlying `keep-core`
+carries a hidden-volume primitive (`keep_core::hidden`): a vault can hold a second storage area
+cryptographically indistinguishable from random padding, so unlocking with a decoy credential
+reveals only the decoy contents and the hidden area's existence cannot be proven. Keep Node does
+not yet expose a decoy-credential *unlock* flow on top of this primitive; that remains future
+work and is distinct from the duress-beacon response above.
 
 ### The evaluation oracle
 
