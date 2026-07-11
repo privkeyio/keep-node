@@ -13,9 +13,10 @@
     description = ''
       The nvpn mesh tun device. Mesh-scoped services (wisp relay, vault-replication receiver, admin
       SSH) open their port only on this interface, so the LAN and the WireGuard underlay never reach
-      them; it must match nvpn's runtime device. Set it here once; the per-service
-      `keepNode.{wisp,adminAccess,vaultReplication.meshReplication}.meshInterface` options each default
-      to it, so they cannot drift apart unless deliberately overridden.
+      them. This name is passed to the daemon (`nvpn connect --iface`), so nvpn creates exactly this
+      device , the firewall scoping and the runtime interface cannot drift apart. Set it here once; the
+      per-service `keepNode.{wisp,adminAccess,vaultReplication.meshReplication}.meshInterface` options
+      each default to it, so they stay consistent unless deliberately overridden.
     '';
   };
 
