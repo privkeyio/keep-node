@@ -121,19 +121,17 @@ in
 
     def fail_closed(node, out_path):
         # Shared fail-closed assertion for the below-threshold (no-quorum) unlock legs. The security
-        # property is "a failed unlock reconstructs no usable key," so the meaningful check is that stdout
-        # carries no key bytes -- not that it is byte-empty. keep-cli's error-exit path writes a terminal
-        # control escape (alt-screen-exit, `\e[?1049l`, the progress-spinner's cleanup) to stdout, so strip
-        # ANSI escapes first, then require what remains to be empty. (On the SUCCESS path stdout is exactly
-        # the 32-byte key -- verified in the 2-of-2 fixture -- so the frost-gate's key capture is
-        # unaffected; the stray escape is a keep-cli stdout-hygiene nit tracked as keep-node-95y.) The
-        # exact-32-byte guard is a second, independent backstop.
-        clean_path = out_path + ".clean"
-        node.succeed(rf"""sed 's/\x1b\[[0-9;?]*[A-Za-z]//g' {out_path} > {clean_path}""")
-        clean_size = node.succeed(f"stat -c %s {clean_path}").strip()
-        assert clean_size == "0", f"fail-closed unlock leaked {clean_size} non-escape bytes to stdout ({out_path})"
+        # property is "a failed unlock reconstructs no usable key." As of keep 0.7.5 (keep-node-95y) a
+        # fail-closed oprf-unlock exit writes NOTHING to stdout: the terminal alt-screen-exit escape
+        # (`\e[?1049l`) the SIGTERM/panic handler used to leak is now suppressed for non-TUI commands, so
+        # stdout is strictly empty -- no ANSI stripping needed, and we assert the raw bytes directly. (On
+        # the SUCCESS path stdout is exactly the 32-byte key -- verified in the 2-of-2 fixture -- so the
+        # frost-gate's key capture is unaffected.) Asserting byte-empty subsumes "no 32-byte key" and
+        # also catches any future stray write to the key-only stdout.
         raw_size = node.succeed(f"stat -c %s {out_path}").strip()
-        assert raw_size != "32", f"fail-closed unlock leaked a 32-byte key ({raw_size} bytes, {out_path})"
+        assert raw_size == "0", (
+            f"fail-closed unlock wrote {raw_size} bytes to stdout; it must be empty (no key, no control bytes) ({out_path})"
+        )
 
     def keep_bg(node, unit, args):
         # Run a long-lived `keep` (serve/announce) as a transient unit in the background.
