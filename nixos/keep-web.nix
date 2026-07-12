@@ -169,7 +169,12 @@ in
     systemd.services.keep-web = {
       description = "keep-web headless daemon";
       wantedBy = [ "multi-user.target" ];
-      after = [ "network.target" ];
+      # With stateRelay set, keep-web dials OUT to the Nostr state relay at startup, so it must wait
+      # for the network to be actually routable, not just configured: network.target does not
+      # guarantee reachability, network-online.target does (and pulls in the wait-online service).
+      # Gated on stateRelay so a purely-local keep-web (no outbound dial) is not delayed at boot.
+      after = [ "network.target" ] ++ lib.optionals (cfg.stateRelay != null) [ "network-online.target" ];
+      wants = lib.optionals (cfg.stateRelay != null) [ "network-online.target" ];
       environment = {
         KEEP_WEB_LISTEN = cfg.listen;
         KEEP_PATH = cfg.path;
