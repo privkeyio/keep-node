@@ -407,6 +407,76 @@
         && c.keepNode.adminAccess.meshInterface == "utun-consolidation-probe"
         && c.keepNode.vaultReplication.meshReplication.meshInterface == "utun-consolidation-probe";
 
+      # The full Tier-4 appliance end-state, composed in ONE system: measured boot + frost-gate in oprf
+      # mode (sealPcrs 7+11) + the nvpn mesh + vault replication + wisp + admin-access, all enabled at
+      # once. This is the stack docs/hardware.md walks an operator to assemble on real hardware, and the
+      # only place every module is composed together , the VM tests each cover a subset (measured-seal:
+      # measuredBoot + frostGate tpm; oprf-gate: frostGate oprf; mesh-replication: mesh + replication).
+      # A cross-module assertion conflict or option clash introduced by a later refactor would otherwise
+      # surface only when the operator builds this on metal; forcing toplevel.drvPath under tryEval turns
+      # it into an eval-time check (no VM, no hardware). All values are valid eval-only fixtures: paths
+      # need not exist (nothing is realised), and the fake npubs/endpoints satisfy the modules' non-null
+      # assertions (group/peers[].npub are plain strings, no format check).
+      tier4System = nixpkgs.lib.nixosSystem {
+        inherit system;
+        modules = [
+          ./nixos/keep-node.nix # composes frost-gate + mesh + vault-replication + admin-access + vaultwarden
+          ./nixos/appliance.nix # UEFI + fileSystems (measured-boot mkForce-overrides systemd-boot)
+          lanzaboote.nixosModules.lanzaboote # measuredBoot sets boot.lanzaboote.*, defined by this input
+          ./nixos/measured-boot.nix
+          wisp.nixosModules.wisp # wisp.nix references services.wisp, defined by this input
+          ./nixos/wisp.nix
+          {
+            security.tpm2.enable = true;
+            keepNode.measuredBoot.enable = true;
+            keepNode.frostGate = {
+              enable = true;
+              mode = "oprf";
+              volumeDevice = "/dev/disk/by-id/ata-VAULT-eval-fixture";
+              keepPackage = keep-cli;
+              keepDbPath = "/var/lib/keep-box";
+              group = "npub1eval0only0fixture0group0000000000000000000000000000000000";
+              relay = "wss://relay.example:7777";
+              keepPasswordCred = "/var/lib/keep-node/keep-password.cred";
+              oprfShareCred = "/var/lib/keep-node/oprf-share.cred";
+              sealPcrs = [
+                7
+                11
+              ];
+              quorum = {
+                threshold = 2;
+                total = 3;
+              };
+            };
+            keepNode.mesh = {
+              enable = true;
+              package = nvpn;
+              selfEndpoint = "192.0.2.10:51820";
+              identityDir = "/run/secrets/nvpn-id";
+              stateDir = "/var/lib/vaultwarden/mesh"; # subdir of frostGate.dataDir, per the disjointness guard
+              peers = [
+                {
+                  npub = "npub1eval0only0fixture0peer00000000000000000000000000000000000";
+                  endpoint = "192.0.2.11:51820";
+                }
+              ];
+            };
+            keepNode.wisp.enable = true;
+            keepNode.vaultReplication = {
+              rsaKeyFile = "/run/secrets/rsa_key.pem";
+              role = "active";
+              litestream.enable = true;
+              meshReplication.enable = true;
+            };
+            keepNode.adminAccess = {
+              enable = true;
+              authorizedKeys = [ "ssh-ed25519 AAAAeval-only-fixture-key keepadmin-eval" ];
+            };
+          }
+        ];
+      };
+      tier4CompositionEvals = builtins.tryEval tier4System.config.system.build.toplevel.drvPath;
+
       # The hardened appliance, as it lands on real hardware: UEFI, Vaultwarden on, keep-web and
       # frost-gate off (frost-gate TPM unlock is opt-in and added later). debug-access is NOT
       # included and Vaultwarden signups default-deny, so this is the secure default profile.
@@ -671,6 +741,17 @@
         # only when flashing on the day. Building it here (same expression as packages.installer-iso)
         # catches that on push-to-main / full-ci; it is excluded from the per-PR fast subset.
         installer-iso = installerSystem.config.system.build.isoImage;
+        # Guards that the full documented Tier-4 stack (measuredBoot + frostGate oprf + mesh + vault
+        # replication + wisp + admin-access, all enabled together) still evaluates its system toplevel.
+        # tryEval turns a cross-module assertion conflict or an undefined-option error (e.g. a module
+        # claiming an option another also sets, or a dropped lanzaboote/wisp import) into a red check at
+        # eval time, instead of when the operator assembles the stack on real hardware.
+        tier4-composition = pkgs.runCommand "tier4-composition" { } (
+          if tier4CompositionEvals.success then
+            "touch $out"
+          else
+            "echo 'Tier-4 appliance composition regression: the full end-state (measuredBoot + frostGate oprf + mesh + vaultReplication + wisp + adminAccess enabled together, the stack docs/hardware.md builds on real hardware) failed to evaluate its system toplevel. A later refactor introduced a cross-module assertion conflict or an undefined-option error (e.g. a module now claims an option another module sets, a coupling assertion became unsatisfiable, or a lanzaboote/wisp input import was dropped).' >&2; exit 1"
+        );
       };
 
       devShells.${system}.default = pkgs.mkShell {
