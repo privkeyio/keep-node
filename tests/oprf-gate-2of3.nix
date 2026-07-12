@@ -73,10 +73,12 @@ in
           threshold = 2;
           total = 3;
         };
-        # Short so leg C fails closed quickly in-test (fast 3s announces make legs A/B converge on the
-        # first attempt anyway); production keeps the 90s default. Each no-peer attempt costs ~24s of
-        # keep's internal discovery, so this budget allows ~2 attempts before failing closed.
-        bootUnlockTimeoutSec = 45;
+        # Bounded boot-unlock retry budget. Sized so leg D can prove retry-THEN-success (boot with
+        # holders down; one comes online mid-retry; a later attempt converges) with comfortable margin,
+        # while leg C still fails closed well within its 180s wait. Legs A/B (a holder serving at boot)
+        # converge on the first attempt regardless. Production keeps the 90s default; each no-peer
+        # attempt costs ~24s of keep's internal discovery.
+        bootUnlockTimeoutSec = 100;
         keepPasswordCred = "/var/lib/keep-node/keep-password.cred";
         oprfShareCred = "/var/lib/keep-node/oprf-share.cred";
         keepPasswordEnvFile = "${pkgs.writeText "keep-pass-env" "KEEP_PASSWORD=fixturepass123"}";
@@ -225,8 +227,38 @@ in
     got = box.succeed(f"VW_PASSWORD={pw} {vw} read {base} {email} mysecret").strip()
     assert got == "SecretValue123", f"leg B read {got!r}, expected SecretValue123 (losing holder A is survivable)"
 
-    # === Leg C: box + neither holder is below threshold -> fail closed. ===
+    # === Leg D (keep-node-asf): retry-then-SUCCESS. The box boots with BOTH holders down, so the
+    # gate's first discovery attempt fails insufficient-peers; a holder then comes online while the
+    # gate is still within its bootUnlockTimeoutSec retry budget, and a later attempt converges. This
+    # covers the gap between leg A (a holder already serving at boot) and leg C (no holder ever), and
+    # exercises the box rebuilding its peer set from live announces across retries. Made deterministic
+    # (not a race against the deadline) by proving the first attempt failed before bringing a holder
+    # up, with a budget sized to leave ample room for a later attempt. ===
     holder2.succeed("systemctl stop holder2-serveB.service")
+    box.shutdown()
+    box.start()
+    box.wait_for_file("/dev/tpmrm0")
+    # Wait until the gate is actively retrying (holders down, so it cannot yet succeed), then let one
+    # full ~24s discovery attempt elapse, so the unlock below is provably a LATER retry.
+    box.wait_until_succeeds(
+        "systemctl show -p ActiveState keep-node-frost-gate.service | grep -qx ActiveState=activating"
+    )
+    import time
+
+    time.sleep(30)
+    # Deterministic proof we are mid-retry after a failed first attempt: no holder was reachable so
+    # nothing unlocked (still locked), and the gate is still retrying (budget not yet exhausted).
+    box.fail("test -e /dev/mapper/keep-vault")
+    box.succeed(
+        "systemctl show -p ActiveState keep-node-frost-gate.service | grep -qx ActiveState=activating"
+    )
+    # A holder comes online mid-retry; a subsequent attempt discovers it and the gate converges to a
+    # mounted, serving vault.
+    serve(holder, "/root/holder", "holder-serveD")
+    gate_unlocked_boot()
+
+    # === Leg C: box + neither holder is below threshold -> fail closed. ===
+    holder.succeed("systemctl stop holder-serveD.service")
     box.shutdown()
     box.start()
     box.wait_for_file("/dev/tpmrm0")
