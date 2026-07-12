@@ -722,21 +722,12 @@
           imports = [ ./tests/install-keepnode.nix ];
           _module.args = {
             inherit adminKeyFixture;
+            # Derive from the SHIPPED bring-up system (not a hand-copy) so the single test-only override
+            # is provably the only divergence: any future change to keepnodeBringupSystem reaches this
+            # test automatically, keeping the "installs the real closure" guarantee from rotting.
             keepnodeToplevel =
-              (nixpkgs.lib.nixosSystem {
-                inherit system;
-                modules = [
-                  ./nixos/keep-node.nix
-                  ./nixos/appliance.nix
-                  {
-                    keepNode.adminAccess = {
-                      enable = true;
-                      authorizedKeysFile = "/etc/keepnode/admin_authorized_keys";
-                      lanBringup = true;
-                    };
-                    boot.loader.efi.canTouchEfiVariables = nixpkgs.lib.mkForce false;
-                  }
-                ];
+              (keepnodeBringupSystem.extendModules {
+                modules = [ { boot.loader.efi.canTouchEfiVariables = nixpkgs.lib.mkForce false; } ];
               }).config.system.build.toplevel;
           };
         };
