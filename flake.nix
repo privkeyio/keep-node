@@ -712,6 +712,34 @@
               }).config.system.build.toplevel;
           };
         };
+        # End-to-end SUCCESSFUL install of the real bring-up appliance (installer-guards above only
+        # covers the abort paths with a stubbed closure): partition + nixos-install + key enrollment,
+        # asserted against the installed /mnt. The installed closure is the real keepnodeBringupSystem
+        # with one test-only accommodation -- canTouchEfiVariables=false -- so nixos-install's bootctl
+        # needs no efivarfs in the BIOS installer VM (the appliance ships it true for the real box).
+        # Heavy (nested install of the full appliance closure); runs in the full-CI subset only.
+        install-keepnode = pkgs.testers.runNixOSTest {
+          imports = [ ./tests/install-keepnode.nix ];
+          _module.args = {
+            inherit adminKeyFixture;
+            keepnodeToplevel =
+              (nixpkgs.lib.nixosSystem {
+                inherit system;
+                modules = [
+                  ./nixos/keep-node.nix
+                  ./nixos/appliance.nix
+                  {
+                    keepNode.adminAccess = {
+                      enable = true;
+                      authorizedKeysFile = "/etc/keepnode/admin_authorized_keys";
+                      lanBringup = true;
+                    };
+                    boot.loader.efi.canTouchEfiVariables = nixpkgs.lib.mkForce false;
+                  }
+                ];
+              }).config.system.build.toplevel;
+          };
+        };
         wisp-mesh = pkgs.testers.runNixOSTest {
           imports = [ ./tests/wisp-mesh.nix ];
           _module.args = {
