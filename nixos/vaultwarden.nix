@@ -23,6 +23,29 @@ in
       default = 8222;
       description = "Vaultwarden HTTP port.";
     };
+    domain = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "http://localhost:8222";
+      description = ''
+        The exact origin clients reach this vault on, published to Vaultwarden as DOMAIN. WebAuthn
+        (YubiKey as 2FA or passkey) binds every credential to this origin: registered against the wrong
+        DOMAIN, the token silently fails to verify on the next login. Set it to the origin you actually
+        type , `http://localhost:8222` for the SSH-tunnelled default (localhost is a secure context, so
+        WebAuthn works there without TLS), or the mesh URL you use. Left null, Vaultwarden falls back to
+        its own default and WebAuthn registration is unreliable.
+
+        Use `http://` ONLY for `localhost`. Browsers treat plain HTTP on any other host (a mesh IP, a
+        LAN name) as a non-secure context and refuse WebAuthn outright, and Vaultwarden drops secure
+        cookies there , so a token cannot be registered at all. Off localhost, reach the vault over an
+        SSH tunnel to `http://localhost:PORT`, or terminate real HTTPS in front of it
+        (`keepNode.ingress`) and use that hostname.
+
+        Only a default: `keepNode.ingress` sets DOMAIN to its own public HTTPS hostname and takes
+        precedence, since that is then the real client-facing origin.
+      '';
+    };
+
     signupsAllowed = lib.mkOption {
       type = lib.types.bool;
       default = false; # default-deny; first user via admin/invite, never open self-registration
@@ -42,7 +65,9 @@ in
         ROCKET_ADDRESS = "127.0.0.1";
         ROCKET_PORT = cfg.port;
         SIGNUPS_ALLOWED = cfg.signupsAllowed;
-      };
+      }
+      # mkDefault so keepNode.ingress, which knows the real public origin, wins when it is enabled.
+      // lib.optionalAttrs (cfg.domain != null) { DOMAIN = lib.mkDefault cfg.domain; };
     };
 
     # No firewall port opened: nothing reaches Vaultwarden except via localhost / the mesh.
