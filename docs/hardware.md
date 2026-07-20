@@ -56,6 +56,102 @@ That's a hardened node on real metal: key-only SSH, no known password, signups d
 the Vaultwarden web vault before the mesh exists, tunnel it: `ssh -L 8222:localhost:8222
 keepadmin@<node-ip>`, then open `http://localhost:8222`.
 
+### Console status display (optional)
+
+Everything above assumes you can already reach the box over SSH. When you can't, the only thing on the
+monitor is a login prompt for accounts that all have locked passwords. `keepNode.statusDisplay` replaces
+that with a read-only status screen, which is most useful exactly here in Tier 0 , before the mesh
+exists and before SSH is proven.
+
+```nix
+keepNode.statusDisplay = {
+  enable = true;          # off by default
+  tty = 1;                # which VT it owns (1-12); 1 is what a plugged-in monitor shows on boot
+  nodeLabel = "vault-rack-3";   # defaults to config.networking.hostName
+  # showMeshAddress = true;     # defaults false, see below
+};
+```
+
+It is two units: `keep-node-status-collect` (root, on a timer, writes one JSON snapshot to
+`/run/keep-node-status/status.json`) and `keep-node-status-render` (unprivileged, reads that file and
+paints the VT). Neither binary is on your `$PATH`; to debug the screen from an SSH session use
+`systemctl status keep-node-status-render`, `journalctl -u keep-node-status-collect`, and
+`cat /run/keep-node-status/status.json`.
+
+**The rows.** `VAULT` is the vault volume (`unlocked` / `locked` / `wrong-device`, the last meaning the
+data dir is mounted from something that is not the gate's mapper). `GATE`, `VAULTWARDEN`, `MESH`,
+`WISP` and `ANTI-LOCKOUT` are the systemd states of the corresponding units. `MESH LINK` appears only
+when `keepNode.mesh.enable` is on, and reads the interface's `UP` flag (not its `state` word, which
+sits at `UNKNOWN` on a healthy tun device). `MESH ADDR` appears only when you opt in.
+`REPLICATION` appears only when `keepNode.vaultReplication.role` is set, and shows the role plus lag in
+seconds when a lag number is available.
+
+**`n/a` vs `unknown` vs `failed`** are three different facts and the screen never conflates them:
+
+- `n/a` (`·`, or `[ -- ]` in ASCII) , the owning module is not enabled on this node. Normal. A node
+  without `frostGate` shows `VAULT n/a`, not `locked`; that is a node that was never gated, not a node
+  whose vault failed to open.
+- `unknown` (`○`, `[ ?? ]`) , the probe did not return, or the value could not be determined. `MESH
+  LINK unknown` means the interface could not be queried, which is not the same claim as the link
+  being down.
+- `failed` (`×`, `[FAIL]`) , the unit actually failed. An absent unit is never reported this way.
+
+Every state is triple-coded (glyph + word + colour), so the reading survives a monochrome panel, a
+colourblind reader, a serial capture and a photograph.
+
+**STALE.** If the newest snapshot is older than `staleSeconds` (default 20, against a `refreshSeconds`
+collection cadence of 5), a red full-width banner appears and **every collected value on the screen is
+replaced by `??`** , not dimmed, not greyed, not left showing its last reading. A greyed-out `UNLOCKED`
+is still read as "unlocked" by someone glancing across the room, and if the collector has stopped, the
+screen no longer knows whether that is true. Only the last-known timestamp (in the footer) and the SSH
+line survive, because those are static config rather than collected facts. The node label is a
+collected value and blanks with everything else, so a stale screen does not tell you which box you are
+looking at , the SSH line at the foot does, since it carries the hostname (when admin SSH is
+configured). Seeing `??` everywhere means the collector is not producing snapshots; check
+`journalctl -u keep-node-status-collect`.
+
+**Anti-lockout renders as a full-width alarm**, not just a row. `nixos/admin-access.nix:198` writes its
+"NO authorized SSH key" warning directly to `/dev/console`. On a default install that is the same VT
+the renderer owns, so a repaint would erase it within a second; with a serial console, or with the
+display moved off whatever VT `/dev/console` maps to, the warning simply lands somewhere the operator
+at the monitor never sees. It is re-raised here as a banner pinned above the fold, where the row-budget
+fitter can never drop or scroll it. If you see it, the box has no admin key and remote access is
+impossible; provision one before you walk away.
+
+The anti-lockout row carries **the age of its own verdict** (`active (checked 3d ago)`), and you should
+read that age, not just the colour. `keep-node-admin-key-check` is a `Type=oneshot` +
+`RemainAfterExit=true` unit with no timer: it runs once at boot and latches its result. A key deleted
+*after* boot does not re-trigger it, so a green anti-lockout row on a long-uptime node means "no lockout
+as of that many days ago", not "no lockout now". To re-verify on demand:
+
+```bash
+systemctl restart keep-node-admin-key-check.service
+```
+
+The screen picks the new verdict, and the reset age, up within one collector cycle.
+
+**If the status screen is blank or dead, use another VT.** The display only ever takes over the VT named
+by `keepNode.statusDisplay.tty`; every other VT keeps its getty. At the default `tty = 1`, press
+**Alt+F2** (through Alt+F6) for a normal login prompt , if you moved the display, that VT is the one to
+avoid and any other Alt+F<n> works. This matters because the display's VT has *no* getty to fall back
+to , `getty@` and `autovt@` for that terminal are disabled, which NixOS implements by masking them, so
+`systemctl start getty@tty<n>` for that VT will refuse. Switching to another VT is the recovery path at
+the keyboard. (Those prompts grant nothing by themselves: every account is password-locked, so you
+still need a key-based SSH session, or physical media, to do anything.) From there,
+`systemctl status keep-node-status-render` and
+`journalctl -u keep-node-status-render` say why the screen is not painting.
+
+**Conflict with `debugAccess`.** `keepNode.debugAccess` sets `services.getty.autologinUser = "root"`,
+which claims tty1. Enabling both with `statusDisplay.tty = 1` is a build-time assertion failure, not a
+runtime surprise. Remedy: either disable `keepNode.debugAccess` (the production posture), or move the
+screen to a free VT with `keepNode.statusDisplay.tty = 2`. The status display takes over only its own
+VT , every other VT keeps its normal getty, which grants nothing anyway since every account is
+password-locked.
+
+Untested on real hardware: this is CI-tested in NixOS VMs like the rest of the tree, so treat the first
+boot on metal (console font, VT geometry, whether your firmware hands you a usable tty1) as something
+to confirm, not assume.
+
 ## Phase 2 (Tier 0, cont.) , mesh onboarding (declarative)
 
 From here you leave the stock image and deploy **your own config** (a flake that imports keep-node's

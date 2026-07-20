@@ -378,6 +378,112 @@
           authorizedKeysFile = "";
         }).success;
 
+      # Pure-eval guard for the statusDisplay cadence and console-ownership assertions. The screen is
+      # the only diagnostic an operator standing at the box gets, so a config that would make it lie
+      # (a permanently-lit STALE banner, a healthy-looking frozen frame, mesh fields stuck on "n/a")
+      # or that would silently steal the bring-up console must fail the BUILD, not surface at 3am on a
+      # rack. Forcing the system toplevel triggers assertions; tryEval turns a fired assertion into
+      # success=false.
+      statusDisplayToplevelEvals =
+        {
+          statusDisplay,
+          debugAccess ? false,
+        }:
+        builtins.tryEval
+          (nixpkgs.lib.nixosSystem {
+            inherit system;
+            modules = [
+              ./nixos/keep-node.nix
+              ./nixos/debug-access.nix
+              {
+                fileSystems."/" = {
+                  device = "/dev/disk/by-label/root";
+                  fsType = "ext4";
+                };
+                boot.loader.grub.enable = false;
+                keepNode.debugAccess.enable = debugAccess;
+                keepNode.statusDisplay = {
+                  enable = true;
+                }
+                // statusDisplay;
+              }
+            ];
+          }).config.system.build.toplevel.drvPath;
+      # Controls: a valid config must still evaluate, otherwise a broken fixture (or a base-config
+      # regression) is indistinguishable from the guard doing its job.
+      statusDisplayControlsEvaluate =
+        (statusDisplayToplevelEvals { statusDisplay = { }; }).success # all defaults
+        # The tty1 contention is tty1-SPECIFIC: debugAccess's autologin getty and a renderer on a
+        # different VT coexist fine, and that is the documented bring-up remedy.
+        && (statusDisplayToplevelEvals {
+          statusDisplay.tty = 2;
+          debugAccess = true;
+        }).success
+        # The allowed staleness boundary: exactly 3x the collector cadence, the recommended minimum.
+        && (statusDisplayToplevelEvals {
+          statusDisplay = {
+            staleSeconds = 15;
+            refreshSeconds = 5;
+          };
+        }).success;
+      statusDisplayBadConfigsRejected =
+        # tty1 claimed by debugAccess's autologin getty: two owners, one VT.
+        !(statusDisplayToplevelEvals {
+          statusDisplay.tty = 1;
+          debugAccess = true;
+        }).success
+        # staleSeconds == refreshSeconds: every snapshot is stale on arrival, banner permanently lit.
+        && !(statusDisplayToplevelEvals {
+          statusDisplay = {
+            staleSeconds = 5;
+            refreshSeconds = 5;
+          };
+        }).success
+        # repaintSeconds >= staleSeconds: a frozen frame keeps looking healthy after the collector dies.
+        && !(statusDisplayToplevelEvals {
+          statusDisplay = {
+            repaintSeconds = 30;
+            staleSeconds = 20;
+          };
+        }).success
+        # The mesh address requested with no mesh: permanent "n/a" that reads as a fault.
+        && !(statusDisplayToplevelEvals { statusDisplay.showMeshAddress = true; }).success;
+
+      # Pure-eval guard for the console brand mark. The status display and the installer MOTD frame a
+      # box sized from brand.markWidth, so a mark line that is not exactly that many COLUMNS wide
+      # leaves every border below it ragged. brand.displayWidth counts columns (not bytes) and returns
+      # null on any glyph outside its known alphabet, so an unmeasurable mark fails rather than
+      # silently reporting a byte count -- see nixos/lib/brand.nix for why byte length is not enough.
+      brand = import ./nixos/lib/brand.nix { inherit (nixpkgs) lib; };
+      brandWidths = map brand.displayWidth brand.markUnicode;
+      brandAsciiWidths = map brand.displayWidth brand.markAscii;
+      brandUniform =
+        ws: ws != [ ] && !(builtins.elem null ws) && nixpkgs.lib.all (w: w == builtins.head ws) ws;
+      brandLineCountsOk = builtins.length brand.markUnicode == 3 && builtins.length brand.markAscii == 3;
+      brandUnicodeUniform = brandUniform brandWidths;
+      brandAsciiUniform = brandUniform brandAsciiWidths;
+      brandMarksAgree = brandUnicodeUniform && brandAsciiUniform && brandWidths == brandAsciiWidths;
+      brandWidthDeclared = brandUnicodeUniform && builtins.head brandWidths == brand.markWidth;
+      # The wordmark sits directly under the mark inside the same frame sized from markWidth, so it
+      # must be measurable and must not overhang it. Null-guarded: comparing null with an int throws.
+      brandWordmarkWidthOk =
+        let
+          ws = [
+            (brand.displayWidth brand.wordmark)
+            (brand.displayWidth brand.wordmarkAscii)
+          ];
+        in
+        !(builtins.elem null ws) && nixpkgs.lib.all (w: w <= brand.markWidth) ws;
+      # The fallback exists for serial/vt100/non-UTF-8 consoles; a stray multibyte byte defeats it.
+      brandAsciiPure =
+        nixpkgs.lib.all brand.isPrintableAscii brand.markAscii
+        && brand.isPrintableAscii brand.wordmarkAscii;
+      brandBlockSwitches = brand.block { } != brand.block { ascii = true; };
+      brandBlockIndents =
+        brand.block { indent = 0; } != brand.block { indent = 4; }
+        && nixpkgs.lib.hasPrefix (builtins.head brand.markUnicode) (brand.block { indent = 0; })
+        && nixpkgs.lib.hasPrefix "    ${builtins.head brand.markUnicode}" (brand.block { indent = 4; });
+
       # Pure-eval guard for the mesh-interface single source of truth: setting keepNode.mesh.interface
       # once must propagate to every mesh-scoped service's meshInterface, so they cannot drift apart.
       # A refactor that reverts one service to a hardcoded default flips this red.
@@ -472,6 +578,14 @@
               enable = true;
               authorizedKeys = [ "ssh-ed25519 AAAAeval-only-fixture-key keepadmin-eval" ];
             };
+            # The console status screen is enabled here specifically because it is option-clash-prone in
+            # a way no VM test can catch: it writes systemd.services."getty@tty1".enable and
+            # "autovt@tty1".enable, defines users.users/groups.keep-status, and sets
+            # boot.consoleLogLevel. Any other module in this stack asserting ownership of the same
+            # attributes (a second getty definition, a conflicting consoleLogLevel set with mkForce)
+            # would collide only when all of them are composed into one system, which is exactly what
+            # this fixture is.
+            keepNode.statusDisplay.enable = true;
           }
         ];
       };
@@ -654,6 +768,63 @@
           else
             "echo 'adminAccess anti-lockout regression: the module either built with no usable key (empty or whitespace-only authorizedKeys and no authorizedKeysFile, a permanent key-only-SSH remote lockout) or refused a valid config (a real inline key, or the installer authorizedKeysFile escape)' >&2; exit 1"
         );
+        statusdisplay-assertions = pkgs.runCommand "statusdisplay-assertions" { } (
+          if !statusDisplayControlsEvaluate then
+            "echo 'statusdisplay-assertions control broke: a VALID statusDisplay config (defaults, or tty=2 alongside debugAccess, or staleSeconds=15 with refreshSeconds=5) unexpectedly failed to evaluate -- base config or nixpkgs regression, or the assertions now over-reject' >&2; exit 1"
+          else if
+            (statusDisplayToplevelEvals {
+              statusDisplay.tty = 1;
+              debugAccess = true;
+            }).success
+          then
+            "echo 'statusDisplay tty guard regression: tty=1 was accepted alongside keepNode.debugAccess.enable, whose services.getty.autologinUser also claims tty1 -- the renderer and the autologin getty would contend for one VT and the bring-up console is lost' >&2; exit 1"
+          else if
+            (statusDisplayToplevelEvals {
+              statusDisplay = {
+                staleSeconds = 5;
+                refreshSeconds = 5;
+              };
+            }).success
+          then
+            "echo 'statusDisplay staleness guard regression: staleSeconds was accepted at or below refreshSeconds -- every freshly-collected snapshot is already stale, so the STALE banner is permanently lit and the operator learns to ignore the one banner that matters' >&2; exit 1"
+          else if
+            (statusDisplayToplevelEvals {
+              statusDisplay = {
+                repaintSeconds = 30;
+                staleSeconds = 20;
+              };
+            }).success
+          then
+            "echo 'statusDisplay repaint guard regression: repaintSeconds was accepted at or above staleSeconds -- the renderer draws the STALE banner, so a healthy-looking frozen screen would persist for a full repaint period after the collector died' >&2; exit 1"
+          else if (statusDisplayToplevelEvals { statusDisplay.showMeshAddress = true; }).success then
+            "echo 'statusDisplay mesh-field guard regression: showMeshAddress was accepted with keepNode.mesh.enable false -- the mesh address row would render a permanent \"n/a\" that reads as a fault and sends the operator chasing a non-existent mesh problem' >&2; exit 1"
+          else if !statusDisplayBadConfigsRejected then
+            "echo 'statusDisplay guard regression: a config the fixtures expect to be rejected evaluated successfully, but no chained case above named it -- a fixture was added to statusDisplayBadConfigsRejected without its own diagnostic' >&2; exit 1"
+          else
+            "touch $out"
+        );
+        brand-shapes = pkgs.runCommand "brand-shapes" { } (
+          if !brandLineCountsOk then
+            "echo 'brand mark shape regression: markUnicode and markAscii must each be exactly 3 lines' >&2; exit 1"
+          else if !brandUnicodeUniform then
+            "echo 'brand mark shape regression: markUnicode lines are not all the same COLUMN width (or a line contains a glyph outside the measurable alphabet, so displayWidth returned null) -- every console box border drawn under the mark would be ragged' >&2; exit 1"
+          else if !brandAsciiUniform then
+            "echo 'brand mark shape regression: markAscii lines are not all the same COLUMN width (or a line is unmeasurable)' >&2; exit 1"
+          else if !brandMarksAgree then
+            "echo 'brand mark shape regression: markAscii is not the same width as markUnicode -- a renderer swapping the fallback in on a serial/non-UTF-8 console would resize the frame' >&2; exit 1"
+          else if !brandWidthDeclared then
+            "echo 'brand mark shape regression: brand.markWidth disagrees with the measured column width of markUnicode -- consumers size their frame from markWidth, so the declared number must track the art' >&2; exit 1"
+          else if !brandWordmarkWidthOk then
+            "echo 'brand mark shape regression: wordmark or wordmarkAscii is unmeasurable or wider than markWidth columns -- it would overhang the frame drawn around the mark' >&2; exit 1"
+          else if !brandAsciiPure then
+            "echo 'brand mark shape regression: markAscii or wordmarkAscii contains a byte outside printable ASCII (0x20-0x7E) -- the fallback exists precisely for consoles that cannot render multibyte glyphs' >&2; exit 1"
+          else if !brandBlockSwitches then
+            "echo 'brand mark shape regression: block { ascii = true; } returned the same string as block { } -- the ascii argument is being ignored' >&2; exit 1"
+          else if !brandBlockIndents then
+            "echo 'brand mark shape regression: block does not honour its indent argument (lines are not prefixed with exactly that many spaces)' >&2; exit 1"
+          else
+            "touch $out"
+        );
         mesh-interface-consolidation = pkgs.runCommand "mesh-interface-consolidation" { } (
           if meshInterfaceInheritance then
             "touch $out"
@@ -688,6 +859,13 @@
         adminaccess-bringup = pkgs.testers.runNixOSTest {
           imports = [ ./tests/adminaccess-bringup.nix ];
           _module.args = { inherit adminKeyFixture; };
+        };
+        status-display = pkgs.testers.runNixOSTest {
+          imports = [ ./tests/status-display.nix ];
+          _module.args = {
+            inherit vaultRsaKeyFixture;
+            nvpnPackage = nvpn;
+          };
         };
         installer-guards = pkgs.testers.runNixOSTest {
           imports = [ ./tests/installer-guards.nix ];
