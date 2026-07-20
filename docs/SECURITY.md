@@ -89,6 +89,38 @@ true of all full-disk encryption. The quorum protects the key at rest and gates 
 unlock on a second holder; it does not protect a live, compromised, running system. Keep
 Node does not claim to.
 
+### The physical console
+
+Physical console access grants nothing today: every account on a hardened node is password-locked, so
+the login prompt on tty1 is not a way in. The opt-in **status display**
+(`keepNode.statusDisplay.enable`, off by default) paints a read-only status screen on one virtual
+terminal instead of that prompt, and it is built so that this stays true.
+
+The module is split in two so that the process holding a terminal has no privilege to lose. The
+**collector** runs as root on a timer, probes the node, and publishes one world-readable JSON snapshot
+under `/run`; it has no terminal. The **renderer** reads that file and paints it, and runs as
+`keep-status` , a system user with `nologin` as its shell and `!` as its password hash, so no `su` or
+PAM path will accept it. The single load-bearing setting is `StandardInput=null`: the renderer holds no
+file descriptor on the keyboard (not `tty`, not `tty-force`), so there is no read path to escape from,
+no line discipline to poke and no "press any key" affordance to find. It parses no input because it is
+given none. Around that: `PrivateNetwork=true` with `RestrictAddressFamilies=AF_UNIX` (a screen painter
+has no business on a network in either direction), an empty `CapabilityBoundingSet`, `NoNewPrivileges`,
+`ProtectSystem=strict`, and `DevicePolicy=closed` with a `DeviceAllow` naming exactly the one configured
+VT , so enabling the display on tty3 does not also hand the renderer tty1-tty12.
+
+A Wayland kiosk was evaluated and rejected for this reason: `foot` binds `ctrl+shift+n` to spawning
+`$SHELL`, which would hand a shell to anyone standing at the box, and a compositor adds a seat and a
+keyboard input consumer to an appliance that deliberately has neither.
+
+What the screen does change is what an attacker at the box can *read*. Vault state, service health and
+the node label are visible to anyone in the room. The mesh address and the peer count are therefore
+separate opt-ins (`showMeshAddress`, `showMeshPeers`, both default false): those are topology
+intelligence, and a peer count is a fact about the whole cluster rather than about this box. Enable
+them only where the console itself is in a trusted location.
+
+This display does not touch the threshold model, adds no password path, opens no port, and introduces
+no network-reachable daemon. It has been tested in NixOS VMs, not on hardware.
+
 ### Duress and coercion
 
 The quorum protects against theft and remote compromise. It does not, on its own, protect

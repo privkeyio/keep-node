@@ -86,10 +86,18 @@ let
   shellList = xs: lib.concatMapStringsSep " " lib.escapeShellArg xs;
 
   # The peer probe spawns a network-touching binary (documented under showMeshPeers), so it runs on a
-  # slower cadence than the rest of the round and its result is cached between passes. 4x is far inside
-  # staleSeconds' floor of 3x refreshSeconds only for the peer field, which is the intended trade: peer
+  # slower cadence than the rest of the round and its result is cached between passes: peer
   # reachability moves on mesh-convergence timescales, not on the collector's.
-  peersIntervalSeconds = 4 * cfg.refreshSeconds;
+  #
+  # But the cache TTL is CLAMPED below staleSeconds, and that clamp is load-bearing. The renderer's
+  # staleness rule is a promise about the whole frame: anything not blanked to "??" is no older than
+  # staleSeconds. An unclamped 4x refreshSeconds breaks that promise for exactly one field -- the
+  # blessed staleSeconds=15/refreshSeconds=5 pairing gives a 20s peer TTL inside a 15s budget, so
+  # MESH PEERS could paint a green count from before the staleness limit on a snapshot the renderer
+  # considers entirely fresh. The assertion only bounds staleSeconds against refreshSeconds and cannot
+  # see this, so the bound is applied here instead. staleSeconds > refreshSeconds >= 1 keeps the
+  # subtraction at 1 or above, so the clamp can never drive the interval to zero.
+  peersIntervalSeconds = lib.max 1 (lib.min (4 * cfg.refreshSeconds) (cfg.staleSeconds - 1));
 
   collector = pkgs.writeShellScriptBin "keep-node-status-collect" ''
     set -euo pipefail
@@ -116,6 +124,7 @@ let
     svc_mesh=unknown
     svc_wisp=unknown
     anti_lockout=unknown
+    anti_lockout_at_json=null
     repl_lag_check=unknown
     mesh_up=false
     mesh_addr=""
@@ -143,18 +152,28 @@ let
     #   probe timed out / returned nothing -> "unknown"   we could not tell
     #   otherwise -> the real ActiveState
     # An absent unit must NEVER render as "failed": that sends an operator chasing a subsystem the node
-    # was never configured to run. Both properties come from ONE systemctl call (halving the probes a
-    # round spawns), parsed as KEY=value rather than with --value, because `systemctl show` does not
-    # promise to echo multiple --property requests back in the order they were asked.
-    unit_state() {
-      local out load active
+    # was never configured to run.
+    #
+    # ONE systemctl call, parsed as KEY=value rather than with --value, because `systemctl show` does
+    # not promise to echo multiple --property requests back in the order they were asked. Sets `load`
+    # and `active` for the two wrappers below, each of which owns only its final mapping -- the shared
+    # probe is identical for both and duplicating it invites the two readings to drift apart.
+    unit_load_active() {
+      local out
+      load=""
+      active=""
       out="$(run ${pkgs.systemd}/bin/systemctl show --property=LoadState --property=ActiveState -- "$1" 2>/dev/null || true)"
       load="$(printf '%s\n' "$out" | ${pkgs.gnused}/bin/sed -n 's/^LoadState=//p' || true)"
+      active="$(printf '%s\n' "$out" | ${pkgs.gnused}/bin/sed -n 's/^ActiveState=//p' || true)"
+    }
+
+    unit_state() {
+      local load active
+      unit_load_active "$1"
       case "$load" in
         "") echo unknown ;;
         not-found | masked) echo "n/a" ;;
         *)
-          active="$(printf '%s\n' "$out" | ${pkgs.gnused}/bin/sed -n 's/^ActiveState=//p' || true)"
           if [ -z "$active" ]; then echo unknown; else echo "$active"; fi
           ;;
       esac
@@ -169,14 +188,12 @@ let
     # anything else -> "ok". The three-way discipline is unchanged -- an absent unit is still "n/a" and
     # never "failed", and a probe that did not return is still "unknown".
     check_unit_state() {
-      local out load active
-      out="$(run ${pkgs.systemd}/bin/systemctl show --property=LoadState --property=ActiveState -- "$1" 2>/dev/null || true)"
-      load="$(printf '%s\n' "$out" | ${pkgs.gnused}/bin/sed -n 's/^LoadState=//p' || true)"
+      local load active
+      unit_load_active "$1"
       case "$load" in
         "") echo unknown ;;
         not-found | masked) echo "n/a" ;;
         *)
-          active="$(printf '%s\n' "$out" | ${pkgs.gnused}/bin/sed -n 's/^ActiveState=//p' || true)"
           case "$active" in
             "") echo unknown ;;
             failed) echo failed ;;
@@ -184,6 +201,27 @@ let
           esac
           ;;
       esac
+    }
+
+    # WHEN the anti-lockout backstop last actually ran. keep-node-admin-key-check is Type=oneshot +
+    # RemainAfterExit with NO timer anywhere in the tree: it runs once at boot and LATCHES "active"
+    # forever. A key deleted after boot -- named at nixos/admin-access.nix:158 as precisely the
+    # scenario the backstop exists for -- never re-triggers it, so the row would paint a green
+    # ANTI-LOCKOUT ok on a node whose admin SSH is already gone.
+    #
+    # That is worse than ordinary staleness because this display's contract trains the operator to
+    # trust it: every other field blanks to "??" the moment it stops being current, so a non-"??"
+    # value reads as "known right now". A boot-latched verdict wearing live-data clothing is exactly
+    # the failure this feature exists to prevent, so the age of the verdict is carried alongside it
+    # and rendered ("active (checked 41d ago)") rather than left implied.
+    #
+    # --timestamp=unix yields "@<epoch>"; a never-activated unit yields "@0" or an empty value, both
+    # of which fall through to "" and simply omit the age rather than claiming a bogus one.
+    unit_active_since() {
+      local ts
+      ts="$(run ${pkgs.systemd}/bin/systemctl show --timestamp=unix --property=ActiveEnterTimestamp --value -- "$1" 2>/dev/null || true)"
+      ts="''${ts#@}"
+      if is_uint "$ts" && [ "$ts" -gt 0 ]; then printf '%s' "$ts"; fi
     }
 
     now="$(run ${pkgs.coreutils}/bin/date +%s 2>/dev/null || echo unknown)"
@@ -198,6 +236,10 @@ let
     svc_mesh="$(unit_state keep-node-mesh.service || echo unknown)"
     svc_wisp="$(unit_state wisp.service || echo unknown)"
     anti_lockout="$(unit_state keep-node-admin-key-check.service || echo unknown)"
+    anti_lockout_at="$(unit_active_since keep-node-admin-key-check.service || true)"
+    if is_uint "$anti_lockout_at"; then
+      anti_lockout_at_json="$anti_lockout_at"
+    fi
     repl_lag_check="$(check_unit_state keep-node-vault-lag-check.service || echo unknown)"
 
     ${
@@ -329,6 +371,7 @@ let
       --arg repl_lag_check "$repl_lag_check" \
       --argjson repl_lag "$lag_json" \
       --arg anti_lockout "$anti_lockout" \
+      --argjson anti_lockout_checked_at "$anti_lockout_at_json" \
       '{
          schema: $schema,
          generated_at: $generated_at,
@@ -346,10 +389,14 @@ let
            lag_check: $repl_lag_check,
            lag_seconds: $repl_lag
          },
-         anti_lockout: $anti_lockout
+         anti_lockout: $anti_lockout,
+         anti_lockout_checked_at: $anti_lockout_checked_at
        }' > "$tmp"; then
-      # Last-ditch: even a broken jq must leave PARSEABLE json, so the renderer reports a collector
-      # fault instead of falling over on a truncated file and showing nothing at all.
+      # Last-ditch: even a broken jq must leave PARSEABLE json, so the renderer can BANNER a collector
+      # fault instead of falling over on a truncated file and showing nothing at all. `error` is a
+      # real degrade reason in the renderer (read_status), not decoration: generated_at here is
+      # CURRENT, so staleness would never fire and without that read the frame would look entirely
+      # normal -- hostname painted, every row "unknown", no banner at all.
       printf '{"schema":1,"generated_at":%s,"node":null,"error":"collector-emit-failed"}\n' "$now" > "$tmp"
     fi
 
@@ -380,6 +427,8 @@ let
       (.replication.lag_check | s),
       (.replication.lag_seconds | s),
       (.anti_lockout | s),
+      (.anti_lockout_checked_at | s),
+      (.error | s),
       "."
     ] | .[]
   '';
@@ -449,6 +498,19 @@ let
       printf '%s' "''${1:-}" | LC_ALL=C ${pkgs.coreutils}/bin/tr -cd '[:print:]'
     }
 
+    # Bound a snapshot-derived string to $1 characters. clean() sanitises CONTENT; this sanitises
+    # LENGTH, which the banner no longer does for itself since it word-wraps instead of hard-cutting.
+    # Callers that put a snapshot value into a banner must clip it, or one oversized field can grow the
+    # header past the whole screen.
+    clip() {
+      local n=$1 s=''${2:-}
+      if [ "''${#s}" -le "$n" ]; then
+        printf '%s' "$s"
+      else
+        printf '%s...' "''${s:0:$n}"
+      fi
+    }
+
     repeat_char() {
       local n=$1 c=$2 out=""
       while [ "''${#out}" -lt "$n" ]; do
@@ -486,8 +548,13 @@ let
       local size=""
       term_cols=""
       term_rows=""
-      # stty on fd 1 (NOT fd 0 -- there is no fd 0 here by design, StandardInput=null) is asked first:
-      # it reads the real kernel window size, where `tput cols` may only know terminfo's static 80x24.
+      # stty is asked first because it reads the real kernel window size, where `tput cols` may only
+      # know terminfo's static 80x24. It is pointed at fd 1, NOT at the renderer's own fd 0: fd 0 is
+      # /dev/null (StandardInput=null) and knows nothing about any terminal. The `0<&1` is a redirection
+      # scoped to this one command -- it duplicates the ALREADY-OPEN, write-only terminal descriptor
+      # onto fd 0 for the lifetime of the stty process alone. It opens nothing, grants no read access
+      # (a dup shares the original's O_WRONLY access mode, so a read would fail with EBADF), and leaves
+      # the renderer's own fd 0 still on /dev/null. The no-input property is untouched.
       if size="$(${pkgs.coreutils}/bin/stty size 0<&1 2>/dev/null)"; then
         term_rows="''${size%% *}"
         term_cols="''${size##* }"
@@ -623,6 +690,21 @@ let
       fi
     }
 
+    # Coarse, single-unit age. Deliberately imprecise: the reader needs "is this verdict minutes or
+    # months old", and a wider string would be the first thing truncated out of a narrow value column.
+    fmt_age() {
+      local secs=''${1:-0}
+      if [ "$secs" -lt 60 ]; then
+        printf '%ds' "$secs"
+      elif [ "$secs" -lt 3600 ]; then
+        printf '%dm' $(( secs / 60 ))
+      elif [ "$secs" -lt 86400 ]; then
+        printf '%dh' $(( secs / 3600 ))
+      else
+        printf '%dd' $(( secs / 86400 ))
+      fi
+    }
+
     read_status() {
       local json line_count gen mtime
       degraded=0
@@ -648,6 +730,8 @@ let
       v_lagchk=""
       v_lag=""
       v_al=""
+      v_al_at=""
+      v_error=""
 
       if [ ! -r "$status_file" ]; then
         degraded=1
@@ -666,10 +750,10 @@ let
       fi
       # A short list means the filter did not produce the shape this reader expects. Reading it anyway
       # would silently slide every field into the wrong slot, which is the one failure that looks
-      # completely plausible on screen. The 17th element is a "." sentinel purely so that a trailing
+      # completely plausible on screen. The LAST element is a "." sentinel purely so that a trailing
       # EMPTY field cannot be eaten by command substitution's newline stripping and fake a short list.
       line_count="$(printf '%s\n' "$json" | ${pkgs.coreutils}/bin/wc -l)"
-      if [ "$line_count" -ne 17 ]; then
+      if [ "$line_count" -ne 19 ]; then
         degraded=1
         degrade_reason="STATUS SNAPSHOT UNREADABLE - UNEXPECTED SHAPE"
         last_ts="$(fmt_time "$mtime")"
@@ -693,11 +777,28 @@ let
         read -r v_lagchk
         read -r v_lag
         read -r v_al
+        read -r v_al_at
+        read -r v_error
       } <<< "$json"
 
       if [ "$v_schema" != "1" ]; then
         degraded=1
-        degrade_reason="STATUS SCHEMA $(clean "$v_schema") UNSUPPORTED - EXPECTED 1"
+        # Bounded before it reaches the banner. clean() strips control bytes but not LENGTH, and the
+        # banner word-wraps rather than hard-cutting, so an unbounded snapshot value would grow the
+        # header without limit -- and `head` is the one array the row-budget fitter never trades away,
+        # so a long enough value pushes every status row and the SSH line off the screen.
+        degrade_reason="STATUS SCHEMA $(clip 24 "$(clean "$v_schema")") UNSUPPORTED - EXPECTED 1"
+        last_ts="$(fmt_time "$mtime")"
+        return 0
+      fi
+
+      # The collector's own emergency payload (its jq emit failed) carries `error` and a CURRENT
+      # generated_at, so staleness can never catch it. Read here it becomes a banner; unread it was a
+      # perfectly normal-looking frame with every row "unknown" and nothing on the glass admitting a
+      # fault -- the exact "plausible but wrong" screen this module refuses to show.
+      if [ -n "$v_error" ]; then
+        degraded=1
+        degrade_reason="COLLECTOR FAULT - $(clip 60 "$(clean "$v_error")")"
         last_ts="$(fmt_time "$mtime")"
         return 0
       fi
@@ -719,17 +820,56 @@ let
       fi
     }
 
+    # Banner text WRAPS on whitespace; it is never sliced mid-sentence. A hard cut to w-6 (34 columns at
+    # the narrow tier) turned "VALUES BELOW ARE NOT KNOWN AND SHOW AS ??" -- 41 characters -- into
+    # "...AND SHO", losing the very "??" the sentence exists to explain, and truncated a long
+    # "STALE - DATA <n>s OLD (LIMIT <n>s)" into an unbalanced open paren. That is the same
+    # cut-mid-token failure already fixed in the SSH footer, which drops its note whole rather than
+    # slicing; a banner cannot be dropped (it is the alarm), so it wraps instead.
+    #
+    # Banners live in `head`, which the row-budget fitter never trades away, so an extra wrapped line
+    # costs a body row on a very short screen rather than the alarm itself.
     add_banner() {
-      local bcode=$1 inner text
+      local bcode=$1 inner text word cur bannerMaxLines=6
       shift
       inner=$(( w - 6 ))
+      if [ "$inner" -lt 1 ]; then inner=1; fi
       colorize "$bcode" "$(repeat_char "$w" '!')"
       head+=("$_c")
+      # Hard ceiling on wrapped lines. Callers clip their snapshot values, so this should never bind;
+      # it is the backstop that keeps a missed clip from costing the operator the whole screen rather
+      # than a few words. `head` is never traded away by the row-budget fitter, so an unbounded banner
+      # pushes every status row AND the SSH line off the glass -- strictly worse than a cut sentence.
+      local emitted=0
       for text in "$@"; do
         text="$(clean "$text")"
-        printf -v line '!! %-*s !!' "$inner" "''${text:0:$inner}"
-        colorize "$bcode" "$line"
-        head+=("$_c")
+        # `set -f` for the word split: clean() permits `*` and `?`, and an unguarded split would let a
+        # degrade reason glob against the working directory and paint filenames into the alarm.
+        set -f
+        cur=""
+        for word in $text; do
+          if [ "$emitted" -ge "$bannerMaxLines" ]; then break; fi
+          if [ -z "$cur" ]; then
+            cur="$word"
+          elif [ $(( ''${#cur} + 1 + ''${#word} )) -le "$inner" ]; then
+            cur="$cur $word"
+          else
+            printf -v line '!! %-*s !!' "$inner" "''${cur:0:$inner}"
+            colorize "$bcode" "$line"
+            head+=("$_c")
+            emitted=$(( emitted + 1 ))
+            cur="$word"
+          fi
+        done
+        set +f
+        if [ "$emitted" -ge "$bannerMaxLines" ]; then cur=""; fi
+        # A single token longer than the whole banner is the one case still hard-cut: there is no
+        # whitespace to break it at, and it carries no sentence to leave half-finished.
+        if [ -n "$cur" ]; then
+          printf -v line '!! %-*s !!' "$inner" "''${cur:0:$inner}"
+          colorize "$bcode" "$line"
+          head+=("$_c")
+        fi
       done
       colorize "$bcode" "$(repeat_char "$w" '!')"
       head+=("$_c")
@@ -758,7 +898,7 @@ let
     }
 
     build_frame() {
-      local i n budget kept sep
+      local i n budget kept sep al_value al_age al_valw al_uptime al_long al_short
       detect_caps
       detect_geometry
       read_status
@@ -783,6 +923,7 @@ let
         v_lagchk="??"
         v_lag="??"
         v_al="??"
+        v_al_at="??"
       fi
 
       brandl=()
@@ -870,7 +1011,47 @@ let
           add_item "$(check_status "$v_lagchk")" REPLICATION "$v_role $v_lagchk"
         fi
       fi
-      add_item "$(unit_status "$v_al")" "ANTI-LOCKOUT" "$v_al"
+      # The anti-lockout verdict is BOOT-LATCHED (Type=oneshot + RemainAfterExit, no timer), so unlike
+      # every other row it can be arbitrarily old while the snapshot carrying it is perfectly fresh.
+      # Showing the bare word would be a green dot asserting "no lockout" about a node whose key was
+      # deleted weeks ago. The age is therefore part of the value, not metadata.
+      #
+      # Two forms, longest-that-fits, then dropped whole -- the SSH footer's discipline. Slicing this
+      # is what produces "active (checked 41d" with an open paren, and the ascii tier's six-column
+      # glyph leaves as little as 19 columns for the value at the narrow tier.
+      al_value="$v_al"
+      # Clamped to uptime, not just to "not in the future". ActiveEnterTimestamp is CLOCK_REALTIME at
+      # activation, so on a box with no RTC (or with NTP landing late) the clock jumps FORWARD after
+      # boot and a check that ran seconds ago computes as decades. The unit cannot have activated
+      # before this boot, so an age exceeding uptime is impossible and the age is dropped rather than
+      # shown -- a fabricated reading on the one row added to stop fabricated readings would be the
+      # worst possible place to have one.
+      # KEEPNODE_STATUS_UPTIME is a test seam, like KEEPNODE_STATUS_WIDTH/ASCII/NOCOLOR above. A long
+      # age is only PHYSICALLY possible on a long-lived node, so a VM three minutes into its life
+      # cannot produce the "checked 41d ago" string whose width behaviour needs testing. Overriding the
+      # plausibility bound is the only way to exercise that path; systemd never sets this, and the worst
+      # a wrong value can do is mis-display an age -- it gates no security property.
+      al_uptime="''${KEEPNODE_STATUS_UPTIME:-}"
+      if [ -z "$al_uptime" ] && [ -r /proc/uptime ]; then
+        al_uptime="$(${pkgs.coreutils}/bin/cut -d' ' -f1 /proc/uptime 2>/dev/null || true)"
+        al_uptime="''${al_uptime%%.*}"
+      fi
+      if [ "$degraded" -eq 0 ] && is_uint "$v_al_at" && [ "$v_al_at" -gt 0 ] && [ "$now" -ge "$v_al_at" ] &&
+        { ! is_uint "$al_uptime" || [ $(( now - v_al_at )) -le "$al_uptime" ]; }; then
+        al_age="$(fmt_age $(( now - v_al_at )))"
+        al_valw=$(( w - 3 - labelw ))
+        if [ "$ascii" -eq 1 ]; then al_valw=$(( al_valw - 6 )); else al_valw=$(( al_valw - 1 )); fi
+        # Measured off the candidate strings themselves rather than off hand-counted widths, so the
+        # fit test cannot drift away from the text it is meant to be measuring.
+        al_long="$v_al (checked $al_age ago)"
+        al_short="$v_al ($al_age ago)"
+        if [ "''${#al_long}" -le "$al_valw" ]; then
+          al_value="$al_long"
+        elif [ "''${#al_short}" -le "$al_valw" ]; then
+          al_value="$al_short"
+        fi
+      fi
+      add_item "$(unit_status "$v_al")" "ANTI-LOCKOUT" "$al_value"
 
       if [ "$tier" = full ]; then foot+=("$sep"); fi
       # two_col gives its left field w-2 columns. The note is appended only if the WHOLE line fits in
@@ -1107,11 +1288,24 @@ in
       type = lib.types.bool;
       default = false;
       description = ''
-        Show mesh peer reachability on the status screen. Off by default for the same reason as
-        `showMeshAddress`, and more so: a peer roster is a map of the whole mesh handed to anyone at
-        the box, not just a fact about this node. Collecting it additionally requires root and spawns
-        a network-touching binary, so when enabled the peer probe runs on a slower cadence than the
-        rest of the collection round rather than on every pass.
+        Show mesh peer reachability on the status screen. Only a COUNT is ever displayed , never peer
+        addresses and never npubs.
+
+        Off by default for the same reason as `showMeshAddress`, and more so: a peer count is a fact
+        about the whole mesh handed to anyone standing at the box, not just a fact about this node.
+
+        Understand the cost before enabling it, because it is not merely a cadence question. Turning
+        this on makes the collector, which runs AS ROOT, execute the mesh daemon binary
+        (`keepNode.mesh.package`) with real network access on every slow pass, and then PARSE ITS
+        OUTPUT. That is the largest privileged attack surface this module has: with the option off the
+        collector opens no internet socket at all (`RestrictAddressFamilies` admits only `AF_UNIX` and
+        `AF_NETLINK`), and with it on `AF_INET`/`AF_INET6` are necessarily readmitted.
+
+        The mitigations that are in place: the probe is wrapped in `probeTimeoutSeconds`, its result is
+        cached so it runs on a slower cadence than the rest of the round rather than on every pass, its
+        exit status is checked before its output is counted, and the only value taken from that output
+        is a line count validated as an unsigned integer. Leave it off unless the peer count genuinely
+        earns that exposure during bring-up.
       '';
     };
 
@@ -1162,6 +1356,19 @@ in
         assertion = (cfg.showMeshAddress || cfg.showMeshPeers) -> (config.keepNode.mesh.enable or false);
         message = "keepNode.statusDisplay.showMeshAddress or showMeshPeers is true but keepNode.mesh.enable is false: there is no mesh to report on, so those fields would render a permanent \"n/a\" that reads as a fault and sends the operator chasing a non-existent mesh problem. Enable keepNode.mesh, or leave the mesh fields off.";
       }
+      {
+        # The peer cache TTL is clamped under staleSeconds to keep the freshness promise, so tightening
+        # staleSeconds also tightens the TTL. Past the point where the TTL falls to refreshSeconds the
+        # cache can never hit, and the peer probe -- which runs the mesh binary AS ROOT WITH NETWORK
+        # ACCESS -- executes on every single round instead of the "slower cadence" its own option
+        # description promises. That is a silent 4x increase in privileged network execution bought by
+        # an option that looks purely like a display tweak, so it is refused at build time rather than
+        # discovered in a journal.
+        assertion = peerProbeUsable -> (cfg.staleSeconds > 2 * cfg.refreshSeconds);
+        message = "keepNode.statusDisplay.showMeshPeers is true but staleSeconds (${toString cfg.staleSeconds}) is not more than twice refreshSeconds (${toString cfg.refreshSeconds}): the peer cache is clamped below staleSeconds, so at this ratio it can never be reused and the root, network-touching peer probe would run on every collection round. Raise staleSeconds above ${
+          toString (2 * cfg.refreshSeconds)
+        }, lower refreshSeconds, or turn showMeshPeers off.";
+      }
     ];
 
     systemd.services.keep-node-status-collect = {
@@ -1193,6 +1400,22 @@ in
         ProtectSystem = "strict";
         ProtectHome = true;
         PrivateTmp = true;
+        # The collector cannot use PrivateNetwork (see above), so the socket families it may open are
+        # narrowed instead. Its baseline needs are AF_UNIX (systemctl and journalctl talk to PID 1 and
+        # the journal over unix sockets) and AF_NETLINK (how ip(8) actually asks the kernel about
+        # links and addresses -- without it every mesh fact reads as unknown).
+        #
+        # AF_INET/AF_INET6 are admitted ONLY when the peer probe is compiled in, because that probe is
+        # the one thing here that genuinely talks to a network. With showMeshPeers off -- the default
+        # -- this root unit cannot open an internet socket at all.
+        RestrictAddressFamilies = [
+          "AF_UNIX"
+          "AF_NETLINK"
+        ]
+        ++ lib.optionals peerProbeUsable [
+          "AF_INET"
+          "AF_INET6"
+        ];
         SystemCallFilter = [ "@system-service" ];
         SystemCallArchitectures = "native";
         RestrictNamespaces = true;
@@ -1239,6 +1462,20 @@ in
       # Belt and braces alongside the getty/autovt disabling below: even if something re-enables the
       # getty for this VT, systemd will not run both owners on the same terminal at once.
       conflicts = [ gettyUnit ];
+      # NO start rate limit. With systemd's defaults (StartLimitBurst=5 in StartLimitIntervalSec=10s)
+      # and RestartSec=2 below, a renderer that fails fast burns its five attempts in about ten
+      # seconds and is then given up on PERMANENTLY -- the 209/STDOUT device-cgroup bug this module
+      # already hit once looked exactly like that.
+      #
+      # There is no recovery from that state at the console. getty@ and autovt@ for this VT are
+      # `enable = false`, which NixOS implements as a /dev/null symlink -- i.e. MASKED -- so
+      # `systemctl start getty@tty1` refuses and the operator is left with a permanently dead terminal
+      # on the one screen this feature exists to provide. Retrying forever is strictly better: the
+      # failure is loud in the journal either way, and a transient cause (a device that appears late,
+      # a VT briefly held by something else) heals itself instead of latching.
+      #
+      # This is a [Unit] directive, not [Service]: putting it in serviceConfig silently does nothing.
+      unitConfig.StartLimitIntervalSec = 0;
       # tput needs a terminfo name, and setterm's blanking controls are linux-console specific.
       environment = {
         TERM = "linux";
@@ -1272,14 +1509,22 @@ in
         #
         # DevicePolicy=closed narrows the unit to the standard pseudo-devices (/dev/null, zero, full,
         # random, urandom). That set does NOT include a virtual terminal: /dev/tty1 is an ordinary
-        # character device, so the manager's own open() of it for StandardOutput=tty is refused by the
-        # device cgroup with EPERM and the unit dies at step STDOUT (209/STDOUT) in a restart loop --
-        # the screen never paints at all. The terminal is opened by the manager, but it is opened with
-        # this unit's cgroup already applied, so the policy very much does reach it.
+        # character device, so opening it for StandardOutput=tty is refused by the device cgroup with
+        # EPERM and the unit dies at step STDOUT (209/STDOUT) in a restart loop -- the screen never
+        # paints at all. The terminal is opened with this unit's cgroup already applied, so the policy
+        # very much does reach it.
         #
         # DeviceAllow re-admits exactly the one VT this module owns, and nothing else: it names the
         # configured tty path rather than the whole `char-tty` class, so enabling the display on tty3
         # does not also hand the renderer tty1..tty12.
+        #
+        # `rw` IS THE MINIMUM -- do not "harden" it to `w`. The read bit is NOT for StandardOutput:
+        # that open is O_WRONLY and `w` alone satisfies it. It is required because TTYVHangup and
+        # TTYReset below reopen the terminal O_RDWR|O_NOCTTY in the child, after the cgroup has been
+        # attached, in order to issue their ioctls. Dropping to `w` reintroduces the 209/STDOUT
+        # restart loop. The renderer process itself still never holds a readable descriptor on the VT
+        # (StandardInput=null; asserted mechanically in tests/status-display.nix), so this bit costs
+        # nothing against the no-input property -- it is a device-cgroup permission, not an open fd.
         DevicePolicy = "closed";
         DeviceAllow = [ "${ttyPath} rw" ];
         # A screen painter has no business on any network, in any direction.

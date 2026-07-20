@@ -79,6 +79,24 @@ HA), see [Hardware bring-up](docs/hardware.md).
 
 > **Hardened by default, reachable by your key.** The installer image is the hardened profile: no known password, key-only SSH (the `keepadmin` account, your enrolled key), `debugAccess` off, Vaultwarden bound to localhost, signups default-deny. During bring-up SSH is reachable on the LAN (`keepNode.adminAccess.lanBringup`) because a fresh node has no mesh yet; once it joins the mesh you redeploy mesh-only. See [Deployment](docs/deployment.md) for the declarative multi-node + admin-access how-to. The legacy `keepnode-debug` profile (known root password, password SSH, open signups) still exists as an explicit opt-in for keyless evaluation, but is never the installed default. `frost-gate` is off, so Vaultwarden data sits on the plain disk with no TPM unlock yet.
 
+### Console status display (optional)
+
+A hardened node boots to a login prompt where every account is password-locked, so an operator standing
+in front of the box learns nothing about why the vault didn't unlock or why the mesh didn't form. The
+status display paints a read-only screen on a virtual terminal instead: node label, vault and gate
+state, service health, anti-lockout, and (opt-in) mesh facts. It is **off by default**; enable it with:
+
+```nix
+keepNode.statusDisplay.enable = true;   # optional: tty = 2, nodeLabel = "vault-rack-3"
+```
+
+It is a pane of glass, not a console. It accepts **no input** (the renderer runs unprivileged with
+`StandardInput=null`, so it holds no descriptor on the keyboard), reaches no shell, and grants nothing
+that physical presence didn't already grant. The mesh address and peer count are separate opt-ins
+(`showMeshAddress`, `showMeshPeers`) because they are network topology shown to whoever is standing
+there. Operator detail in [Hardware bring-up](docs/hardware.md#console-status-display-optional);
+threat model in [Security](docs/SECURITY.md).
+
 ## License
 
 [MIT](LICENSE)

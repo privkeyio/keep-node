@@ -3,11 +3,17 @@
 # ISO store via system.extraDependencies, so `install-keepnode` installs with no network and no
 # rebuild on the target machine.
 {
+  lib,
   pkgs,
   keepnodeToplevel,
   ...
 }:
 let
+  # Same mark the installed node's status screen paints, so the ISO console and the appliance console
+  # are recognisably the same product. indent = 0 because the instructions below are flush left and a
+  # mark floating two columns off them reads as a misalignment rather than as a frame.
+  brand = import ./lib/brand.nix { inherit lib; };
+
   install-keepnode = pkgs.writeShellScriptBin "install-keepnode" ''
     set -euo pipefail
     # Partitioning needs root; the installer logs in as an unprivileged user, so re-exec via sudo.
@@ -118,10 +124,14 @@ in
   # Bake the appliance into the ISO so the install is fully offline.
   system.extraDependencies = [ keepnodeToplevel ];
 
+  # Unicode, not ascii: this MOTD is only ever seen over SSH or on the ISO's own UTF-8 console, both of
+  # which render the block glyphs. The installed node's renderer has to decide that at runtime (serial
+  # consoles, non-UTF-8 locales); here it is known at build time.
   users.motd = ''
 
-    keep-node installer
-    ===================
+    ${brand.block { indent = 0; }}
+    installer
+    =========
     1) See your disks:        lsblk
     2) Install (ERASES disk): install-keepnode /dev/nvme0n1 --ssh-key "ssh-ed25519 AAAA... you@host"
        --ssh-key takes your PUBLIC key inline (paste it), or a file path if you first copy the key

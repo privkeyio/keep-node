@@ -161,6 +161,96 @@ in
       box.succeed("grep -q 'ANTI-LOCKOUT' /tmp/screen_healthy")
 
       # ---------------------------------------------------------------------------------------------
+      # The anti-lockout verdict carries its own AGE. keep-node-admin-key-check is Type=oneshot +
+      # RemainAfterExit with no timer anywhere in the tree: it runs once at boot and latches "active"
+      # forever, so a key deleted after boot never re-triggers it. Without the age beside it, the row
+      # paints a green "ok" on a node whose admin SSH is already gone -- and on a display where every
+      # other field blanks to ?? the moment it stops being current, a non-?? value reads as "true right
+      # now". The age is what stops the row from wearing live-data clothing.
+      #
+      # keepNode.adminAccess is OFF on these nodes, so the unit is genuinely absent here. That is worth
+      # asserting in its own right: the field must be null rather than fabricating an age for a check
+      # that never ran.
+      box.succeed("jq -e 'has(\"anti_lockout_checked_at\")' ${statusFile} >/dev/null")
+      box.succeed("jq -e '.anti_lockout == \"n/a\" and .anti_lockout_checked_at == null' ${statusFile} >/dev/null")
+      box.succeed(
+          "KEEPNODE_STATUS_WIDTH=80 KEEPNODE_STATUS_ASCII=1 KEEPNODE_STATUS_NOCOLOR=1 TERM=linux "
+          "${render} --once --status-file ${statusFile} > /tmp/frame_al_absent"
+      )
+      # No timestamp, no age claim -- and specifically no "checked 0s ago", which would be a lie about
+      # a check that has never run.
+      box.fail("grep -q 'checked' /tmp/frame_al_absent")
+
+      # The rendering of a REAL, old verdict, driven from a fixture so the age is exact rather than
+      # whatever the VM's uptime happens to be. 41 days is chosen to be unmistakably not-now.
+      box.succeed(
+          "jq -n --argjson generated_at \"$(date +%s)\" "
+          "--argjson checked_at \"$(( $(date +%s) - 41 * 86400 ))\" "
+          "'{schema:1, generated_at:$generated_at, node:\"agetest\", "
+          "vault:{state:\"unlocked\",gate:\"active\"}, "
+          "services:{vaultwarden:\"active\",mesh:\"n/a\",wisp:\"n/a\"}, "
+          "mesh:{interface:null,up:false,address:null,peers:null}, "
+          "replication:{role:null,lag_check:\"n/a\",lag_seconds:null}, "
+          "anti_lockout:\"active\", anti_lockout_checked_at:$checked_at}' > /tmp/al_old.json"
+      )
+      # KEEPNODE_STATUS_UPTIME: the renderer refuses to show an age exceeding this boot's uptime, since
+      # the unit cannot have activated before the machine started. A 41-day age is therefore physically
+      # impossible on a VM minutes into its life, and without this seam the fixture exercises the clamp
+      # instead of the width behaviour it exists to test. The clamp itself is asserted separately below.
+      box.succeed(
+          "KEEPNODE_STATUS_UPTIME=9999999 "
+          "KEEPNODE_STATUS_WIDTH=80 KEEPNODE_STATUS_ASCII=1 KEEPNODE_STATUS_NOCOLOR=1 TERM=linux "
+          "${render} --once --status-file /tmp/al_old.json > /tmp/frame_al_old"
+      )
+      print("=== frame with a 41-day-old anti-lockout verdict ===")
+      print(box.succeed("cat /tmp/frame_al_old"))
+      # The frame is otherwise healthy, so the age is the row's doing and not the staleness blanking.
+      box.fail("grep -q 'STALE' /tmp/frame_al_old")
+      box.succeed("grep -qE '\\[ ok \\] +ANTI-LOCKOUT +active \\(checked 41d ago\\)' /tmp/frame_al_old")
+
+      # The age must be DROPPED WHOLE when it does not fit, never sliced into an unbalanced paren --
+      # the SSH footer's discipline. At w=40 in the ascii tier the value column is 19 columns, which
+      # fits the short form but not the long one.
+      box.succeed(
+          "KEEPNODE_STATUS_UPTIME=9999999 "
+          "KEEPNODE_STATUS_WIDTH=40 KEEPNODE_STATUS_ASCII=1 KEEPNODE_STATUS_NOCOLOR=1 TERM=linux "
+          "${render} --once --status-file /tmp/al_old.json > /tmp/frame_al_narrow"
+      )
+      print("=== narrow-tier anti-lockout age ===")
+      print(box.succeed("cat /tmp/frame_al_narrow"))
+      box.succeed(
+          "awk -v w=40 'length($0) > w { print \"OVERWIDE \" length($0) \": \" $0; bad=1 } "
+          "END { exit bad }' /tmp/frame_al_narrow"
+      )
+      # Positive assertion FIRST. The three negative checks below all pass vacuously if the age feature
+      # broke entirely or the fixture aged past staleSeconds -- v_al_at blanks, no parenthetical is
+      # emitted, and "no half-written parenthetical" becomes trivially true. This pins the short form
+      # that is supposed to survive here, which is the actual "drop whole, do not slice" property.
+      box.succeed("grep -qF 'active (41d ago)' /tmp/frame_al_narrow")
+      # Whatever form survived, it is not a half-written parenthetical.
+      box.fail("grep -qE '\\((checked )?41d( ago)?$' /tmp/frame_al_narrow")
+      box.fail("grep -q '(checked$' /tmp/frame_al_narrow")
+
+      # ---------------------------------------------------------------------------------------------
+      # The uptime clamp. ActiveEnterTimestamp is CLOCK_REALTIME at activation, so a box with no RTC
+      # (or with NTP landing after boot) jumps the clock forward and a check that ran seconds ago
+      # computes as decades. The unit cannot have activated before this boot, so an age exceeding
+      # uptime is impossible and must be DROPPED rather than painted -- a fabricated reading on the one
+      # row added to stop fabricated readings is the worst possible place to have one.
+      #
+      # Same 41-day fixture, real /proc/uptime this time (VM is minutes old), so the age is impossible.
+      box.succeed(
+          "KEEPNODE_STATUS_WIDTH=80 KEEPNODE_STATUS_ASCII=1 KEEPNODE_STATUS_NOCOLOR=1 TERM=linux "
+          "${render} --once --status-file /tmp/al_old.json > /tmp/frame_al_skew"
+      )
+      print("=== impossible age (exceeds uptime) must be dropped ===")
+      print(box.succeed("cat /tmp/frame_al_skew"))
+      # The row still renders and still reads healthy -- only the implausible AGE is withheld.
+      box.succeed("grep -qE '\\[ ok \\] +ANTI-LOCKOUT +active *$' /tmp/frame_al_skew")
+      box.fail("grep -q '41d' /tmp/frame_al_skew")
+      box.fail("grep -q 'checked' /tmp/frame_al_skew")
+
+      # ---------------------------------------------------------------------------------------------
       # THE staleness property. Stop the collector and let the snapshot age past staleSeconds. Two
       # separate things must hold, and the second is the one that matters: the banner lights, AND every
       # collected value is REPLACED by "??". A greyed-out or last-known "unlocked" left on the glass is
@@ -200,6 +290,55 @@ in
       box.succeed("systemctl start vaultwarden.service")
 
       # ---------------------------------------------------------------------------------------------
+      # ActiveState=failed, end to end. Until now NO unit in this test was ever driven to `failed`, so
+      # the collector's unit_state -> "failed" mapping, the renderer's unit_status -> `fail`, and the
+      # `fail` glyph itself were entirely unexercised -- despite state mapping being the exact bug class
+      # that already regressed here once (a non-latching oneshot read as a raw ActiveState painted a
+      # healthy node permanently amber).
+      #
+      # A runtime drop-in under /run replaces a PROBED unit's ExecStart with a command that exits 1.
+      # It has to be a probed unit: the collector asks about a fixed list of unit names, so a standalone
+      # fixture unit would fail invisibly and prove nothing. `Restart=no` is part of the fixture -- with
+      # the packaged restart policy left in place the unit sits in "activating" (auto-restart) instead
+      # of settling at "failed", which is a different state and not the one under test.
+      box.succeed("mkdir -p /run/systemd/system/vaultwarden.service.d")
+      box.succeed(
+          "printf '[Service]\\nExecStart=\\nExecStart=/bin/sh -c \"exit 1\"\\nRestart=no\\n' "
+          "> /run/systemd/system/vaultwarden.service.d/99-fail-fixture.conf"
+      )
+      box.succeed("systemctl daemon-reload")
+      box.succeed("systemctl restart vaultwarden.service || true")
+      box.wait_until_succeeds("systemctl is-failed --quiet vaultwarden.service", timeout=${toString slow})
+
+      # The collector maps it to "failed" -- and specifically NOT to "n/a", which is the mapping an
+      # absent unit gets and would quietly hide a genuinely broken service.
+      box.wait_until_succeeds("jq -e '.services.vaultwarden == \"failed\"' ${statusFile} >/dev/null", timeout=${toString slow})
+      box.succeed("jq -r '.services.vaultwarden' ${statusFile} > /tmp/svc_failed")
+      box.fail("grep -qx 'n/a' /tmp/svc_failed")
+
+      # ...and the renderer turns that into the `fail` glyph on the row. Read through --once in the
+      # ascii tier so the assertion is on plain text ("[FAIL]") rather than on the U+00D7 byte, which
+      # reading /dev/vcs1 would make brittle. The frame must be otherwise healthy, so this is the state
+      # mapping's doing and not the staleness blanking painting everything unknown.
+      box.succeed(
+          "KEEPNODE_STATUS_WIDTH=80 KEEPNODE_STATUS_ASCII=1 KEEPNODE_STATUS_NOCOLOR=1 TERM=linux "
+          "${render} --once --status-file ${statusFile} > /tmp/frame_failed"
+      )
+      print("=== frame with a failed unit ===")
+      print(box.succeed("cat /tmp/frame_failed"))
+      box.fail("grep -q 'STALE' /tmp/frame_failed")
+      box.succeed("grep -qE '\\[FAIL\\] +VAULTWARDEN' /tmp/frame_failed")
+      box.fail("grep -qE '\\[ -- \\] +VAULTWARDEN' /tmp/frame_failed")
+
+      # Restore, and prove the fail state was not sticky -- a `fail` glyph that never clears is as
+      # useless as one that never lights.
+      box.succeed("rm -f /run/systemd/system/vaultwarden.service.d/99-fail-fixture.conf")
+      box.succeed("systemctl daemon-reload")
+      box.succeed("systemctl reset-failed vaultwarden.service")
+      box.succeed("systemctl restart vaultwarden.service")
+      box.wait_until_succeeds("jq -e '.services.vaultwarden == \"active\"' ${statusFile} >/dev/null", timeout=${toString slow})
+
+      # ---------------------------------------------------------------------------------------------
       # The no-input guarantee, checked MECHANICALLY rather than by reading the unit file. StandardInput
       # = "null" is the single line that makes "physical console grants nothing" structural: with fd 0 on
       # /dev/null there is no read path to escape from, no line discipline to poke, no "press any key".
@@ -208,6 +347,62 @@ in
       assert pid.isdigit() and int(pid) > 0, f"renderer has no MainPID: {pid!r}"
       box.succeed(f"readlink /proc/{pid}/fd/0 > /tmp/fd0")
       box.succeed("grep -qx /dev/null /tmp/fd0")
+
+      # The TIOCSTI question, VERIFIED rather than inferred. TIOCSTI ("push this byte back into the
+      # terminal's input queue") is the classic way a process holding a VT fabricates keystrokes for
+      # whatever reads that terminal next. The kernel requires a descriptor open for READING to issue
+      # it. The security review concluded by reading the unit file that the renderer holds no such
+      # descriptor; that conclusion is asserted here against the running process instead.
+      #
+      # Two independent properties, because either one alone leaves a gap:
+      #   1. NO descriptor on the VT is open in a readable mode. Not just fd 0: fd 1 is the terminal
+      #      (StandardOutput=tty), and this proves the manager opened it O_WRONLY rather than O_RDWR.
+      #      Access mode is the low two bits of the octal `flags:` field in fdinfo (0=RDONLY, 1=WRONLY,
+      #      2=RDWR), so a readable VT fd is anything whose accmode is not 1.
+      #   2. The process has NO controlling terminal, i.e. field 7 (tty_nr) of /proc/PID/stat is 0.
+      #      Without one there is no /dev/tty to reopen -- which is how a process that was given only a
+      #      write-only fd could otherwise get a fresh read-write one back.
+      vt = "/dev/tty1"
+      fds = box.succeed(f"ls /proc/{pid}/fd").split()
+      assert fds, f"renderer {pid} has no open descriptors at all"
+      saw_vt = False
+      for fd in fds:
+          # Target and flags in ONE round trip, both tolerant of the fd vanishing. The renderer runs
+          # command substitutions every repaintSeconds, each transiently opening a pipe fd, so an entry
+          # present in the `ls` above can be gone by the time a separate driver round trip reaches it.
+          # An unguarded awk exits 2 there and fails the test on a race rather than on a defect.
+          probe = box.succeed(
+              f"readlink /proc/{pid}/fd/{fd} 2>/dev/null || true; echo '|'; "
+              f"awk '/^flags:/{{print $2}}' /proc/{pid}/fdinfo/{fd} 2>/dev/null || true"
+          )
+          target, _, flags = probe.partition("|")
+          target, flags = target.strip(), flags.strip()
+          if not target or not flags:
+              continue
+          accmode = int(flags, 8) & 3
+          print(f"fd {fd} -> {target} flags={flags} accmode={accmode}")
+          if target == vt:
+              saw_vt = True
+              assert accmode == 1, (
+                  f"renderer fd {fd} is open on {vt} in a READABLE mode (accmode={accmode}, "
+                  f"flags={flags}): TIOCSTI keystroke injection into this VT becomes possible, and "
+                  f"'the console accepts no input' stops being a structural property"
+              )
+          assert not (target == "/dev/tty"), f"renderer fd {fd} is on /dev/tty (a controlling terminal)"
+
+      # Non-vacuity: if the renderer held NO descriptor on the VT at all, the loop above would pass
+      # while proving nothing. It must hold one (that is how it paints) -- just never a readable one.
+      assert saw_vt, f"renderer holds no descriptor on {vt}; the fd-mode assertion above was vacuous"
+
+      # No controlling terminal. comm (field 2) can itself contain spaces and parens, so fields are
+      # counted from the LAST ')' -- after which stat's field 3 (state) is index 0, making tty_nr
+      # (field 7) index 4.
+      stat_line = box.succeed(f"cat /proc/{pid}/stat")
+      tty_nr = int(stat_line[stat_line.rindex(")") + 1:].split()[4])
+      assert tty_nr == 0, (
+          f"renderer has a controlling terminal (tty_nr={tty_nr}); it could reopen /dev/tty read-write "
+          f"and regain exactly the read path StandardInput=null exists to deny"
+      )
 
       # The account holding the terminal cannot be logged into even if a path to it were found: no
       # password (`!` is unmatchable) and a nologin shell.
@@ -247,8 +442,29 @@ in
       box.fail("grep -qi 'login:' /tmp/screen_postchvt")
 
       # tty2 keeps its getty on purpose (every account is password-locked, so it grants nothing, and
-      # debugAccess uses it during bring-up). Displacing tty1 must not have taken the others with it.
-      box.succeed("systemctl cat getty@tty2.service >/dev/null")
+      # debugAccess uses it during bring-up). Displacing tty1 must not have taken the others with it,
+      # and Alt+F2 is the ONLY console recovery path if the renderer dies -- tty1 has no getty left to
+      # fall back to.
+      #
+      # `systemctl cat getty@tty2.service` was the previous check and proved nothing: cat succeeds on
+      # any template unit regardless of enablement, and for a MASKED instance it happily prints the
+      # /dev/null symlink target. LoadState is the property that actually distinguishes them, because
+      # NixOS implements `enable = false` for a unit as exactly that /dev/null symlink, which systemd
+      # reports as "masked". So the two VTs must disagree here, and that disagreement is the assertion.
+      box.succeed("systemctl show -p LoadState --value getty@tty1.service > /tmp/getty1_load")
+      box.succeed("systemctl show -p LoadState --value getty@tty2.service > /tmp/getty2_load")
+      print("=== getty LoadState: tty1 / tty2 ===")
+      print(box.succeed("cat /tmp/getty1_load /tmp/getty2_load"))
+      box.succeed("grep -qx 'masked' /tmp/getty1_load")
+      box.fail("grep -qx 'masked' /tmp/getty2_load")
+      box.succeed("grep -qx 'loaded' /tmp/getty2_load")
+
+      # And the same for autovt@, the one that is easy to miss: logind instantiates it on demand, so if
+      # tty2's were masked too, Alt+F2 would silently produce nothing at the keyboard.
+      box.succeed("systemctl show -p LoadState --value autovt@tty1.service > /tmp/autovt1_load")
+      box.succeed("systemctl show -p LoadState --value autovt@tty2.service > /tmp/autovt2_load")
+      box.succeed("grep -qx 'masked' /tmp/autovt1_load")
+      box.fail("grep -qx 'masked' /tmp/autovt2_load")
 
       # ---------------------------------------------------------------------------------------------
       # Escape injection, end to end. The collector is trusted and the renderer sanitises anyway: the
@@ -334,6 +550,88 @@ in
       box.succeed("grep -q 'no console login)' /tmp/frame_100")
 
       # ---------------------------------------------------------------------------------------------
+      # The DEGRADED paths, through --once --status-file. Only the timer-driven STALE path had ever been
+      # covered; the missing-file, malformed-JSON, wrong-schema and collector-fault paths were all
+      # unexercised, even though each one is a distinct banner and each one is what stands between the
+      # operator and a plausible-looking frame full of numbers that are not true.
+      #
+      # Every one of them must satisfy the SAME two properties as the STALE path: the banner names the
+      # reason, and every collected value is blanked to "??".
+      # ---------------------------------------------------------------------------------------------
+      def degraded_frame(name, setup, expect, width=80):
+          if setup:
+              box.succeed(setup)
+          box.succeed(
+              f"KEEPNODE_STATUS_WIDTH={width} KEEPNODE_STATUS_ASCII=1 KEEPNODE_STATUS_NOCOLOR=1 "
+              f"TERM=linux ${render} --once --status-file /tmp/deg_{name}.json > /tmp/frame_deg_{name}"
+          )
+          print(f"=== degraded frame: {name} ===")
+          print(box.succeed(f"cat /tmp/frame_deg_{name}"))
+          # The banner names the reason...
+          box.succeed(f"grep -qF '{expect}' /tmp/frame_deg_{name}")
+          # ...and nothing collected survived. The unlocked/active greps are the ones that matter: a
+          # last-known reading left on the glass is read as current by anyone glancing at it.
+          box.succeed(f"grep -q '??' /tmp/frame_deg_{name}")
+          box.fail(f"grep -qE '(unlocked|active)' /tmp/frame_deg_{name}")
+          # The static SSH line is not a collected fact and must survive -- it is how the operator
+          # standing at a screen full of ?? gets to a shell to fix it.
+          box.succeed(f"grep -q 'SSH' /tmp/frame_deg_{name}")
+
+      # 1. No snapshot at all: the collector has never run, or /run was wiped.
+      box.succeed("rm -f /tmp/deg_missing.json")
+      degraded_frame("missing", None, "NO STATUS SNAPSHOT")
+
+      # 2. Unparseable bytes where JSON should be (a truncated write, a half-written file).
+      degraded_frame("malformed", "printf 'this is not json{' > /tmp/deg_malformed.json", "MALFORMED JSON")
+
+      # 3. A snapshot from a FUTURE schema. Parsing it against schema 1's field vocabulary would slide
+      #    values into the wrong rows, which is the failure mode that looks entirely plausible.
+      degraded_frame(
+          "schema",
+          "jq -n --argjson generated_at \"$(date +%s)\" "
+          "'{schema:2, generated_at:$generated_at, node:\"future\"}' > /tmp/deg_schema.json",
+          "UNSUPPORTED",
+      )
+
+      # 4. The collector's OWN emit failure. This is the subtle one: the fallback payload carries a
+      #    CURRENT generated_at, so staleness can never fire on it, and until the renderer read `.error`
+      #    the result was a completely normal-looking frame -- hostname painted, every row "unknown",
+      #    no banner anywhere. The comment in the collector claimed a fault was reported; nothing read
+      #    the field.
+      degraded_frame(
+          "collector",
+          "jq -n --argjson generated_at \"$(date +%s)\" "
+          "'{schema:1, generated_at:$generated_at, node:null, error:\"collector-emit-failed\"}' "
+          "> /tmp/deg_collector.json",
+          "COLLECTOR FAULT",
+      )
+
+      # Non-vacuity for the collector-fault case specifically: prove the snapshot is NOT stale, so the
+      # banner above came from reading .error and not from the age check firing by luck.
+      box.succeed("jq -e '(now - .generated_at) < 5' /tmp/deg_collector.json >/dev/null")
+
+      # ---------------------------------------------------------------------------------------------
+      # Banner text WRAPS, never slices. At w=40 the inner width is 34 and the notice is 41 characters,
+      # so a hard cut produced "...AND SHO" -- dropping the very "??" the sentence exists to explain.
+      # Asserted at the narrowest tier, which is the only one where it bites.
+      # ---------------------------------------------------------------------------------------------
+      box.succeed(
+          "KEEPNODE_STATUS_WIDTH=40 KEEPNODE_STATUS_ASCII=1 KEEPNODE_STATUS_NOCOLOR=1 TERM=linux "
+          "${render} --once --status-file /tmp/deg_malformed.json > /tmp/frame_banner40"
+      )
+      print("=== narrow-tier banner wrap ===")
+      print(box.succeed("cat /tmp/frame_banner40"))
+      # Still inside the width budget after wrapping...
+      box.succeed(
+          "awk -v w=40 'length($0) > w { print \"OVERWIDE \" length($0) \": \" $0; bad=1 } "
+          "END { exit bad }' /tmp/frame_banner40"
+      )
+      # ...the sentence survived WHOLE across the wrap, including its trailing ?? ...
+      box.succeed("grep -q 'SHOW AS ??' /tmp/frame_banner40")
+      # ...and no line ends mid-word on the word the old hard cut split.
+      box.fail("grep -q 'AND SHO *!!' /tmp/frame_banner40")
+
+      # ---------------------------------------------------------------------------------------------
       # The REPLICATION row, which has never been rendered, and the collector's lag_seconds journal
       # parsing, which has never been exercised. Both are gated on vaultReplication.role.
       # ---------------------------------------------------------------------------------------------
@@ -406,5 +704,42 @@ in
           timeout=${toString slow},
       )
       standby.succeed("grep -q 'REPLICATION' /tmp/screen_repl")
+
+      # ---------------------------------------------------------------------------------------------
+      # The OTHER half of the verdict mapping: check_unit_state -> "failed" -> check_status -> `fail`.
+      # Everything above only ever drove this unit through its healthy "inactive" state, so the failing
+      # branch of the non-latching-oneshot reading had never executed. That branch is the whole reason
+      # this unit is read via `is-failed` semantics instead of as a raw ActiveState, so leaving it
+      # untested left the interesting half of the fix unguarded.
+      #
+      # Same runtime drop-in technique as the vaultwarden fixture on box: replace ExecStart with a
+      # command that exits 1 and let the unit settle at failed.
+      standby.succeed("mkdir -p /run/systemd/system/keep-node-vault-lag-check.service.d")
+      standby.succeed(
+          "printf '[Service]\\nExecStart=\\nExecStart=/bin/sh -c \"exit 1\"\\n' "
+          "> /run/systemd/system/keep-node-vault-lag-check.service.d/99-fail-fixture.conf"
+      )
+      standby.succeed("systemctl daemon-reload")
+      standby.succeed("systemctl start keep-node-vault-lag-check.service || true")
+      standby.wait_until_succeeds("systemctl is-failed --quiet keep-node-vault-lag-check.service", timeout=${toString slow})
+
+      # The collector emits the VERDICT vocabulary here ("failed"), not a raw ActiveState.
+      standby.wait_until_succeeds("jq -e '.replication.lag_check == \"failed\"' ${statusFile} >/dev/null", timeout=${toString slow})
+
+      standby.succeed(
+          "KEEPNODE_STATUS_WIDTH=80 KEEPNODE_STATUS_ASCII=1 KEEPNODE_STATUS_NOCOLOR=1 TERM=linux "
+          "${renderStandby} --once --status-file ${statusFile} > /tmp/frame_repl_failed"
+      )
+      print("=== standby frame with a failed lag check ===")
+      print(standby.succeed("cat /tmp/frame_repl_failed"))
+      standby.fail("grep -q 'STALE' /tmp/frame_repl_failed")
+      standby.succeed("grep -qE '\\[FAIL\\] +REPLICATION' /tmp/frame_repl_failed")
+      # Not amber and not "absent": those are the two mappings this row must never collapse into.
+      standby.fail("grep -qE '\\[warn\\] +REPLICATION' /tmp/frame_repl_failed")
+      standby.fail("grep -qE '\\[ -- \\] +REPLICATION' /tmp/frame_repl_failed")
+
+      standby.succeed("rm -f /run/systemd/system/keep-node-vault-lag-check.service.d/99-fail-fixture.conf")
+      standby.succeed("systemctl daemon-reload")
+      standby.succeed("systemctl reset-failed keep-node-vault-lag-check.service")
     '';
 }
