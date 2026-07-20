@@ -2,7 +2,7 @@
 #
 # A line is `[options] algorithm base64-body [comment]`: the options field may be absent, the field
 # separator may be a TAB (sshd accepts it), and the comment is free-form text. So the algorithm is not
-# simply everything up to the first space, and getting it wrong fails in BOTH directions , a
+# simply everything up to the first space, and getting it wrong fails in BOTH directions, a
 # tab-separated or options-prefixed hardware key read as software is a false anti-lockout build
 # failure, while an algorithm name occurring in a software key's COMMENT read as the key type reports
 # a hardware key present on a node whose only key sshd will refuse. Only the first two fields are ever
@@ -43,7 +43,7 @@ rec {
   # Add `option` to a line's options field. Options are ONE comma-separated field before the algorithm,
   # so a line that already carries options must be extended in place: prepending a second
   # space-separated field yields `verify-required from="..." sk-... body`, which sshd cannot parse, and
-  # the key is then silently ignored , an enrolled-but-dead key that still satisfies the anti-lockout
+  # the key is then silently ignored, an enrolled-but-dead key that still satisfies the anti-lockout
   # guards. Idempotent, so a line that already states the option is returned unchanged.
   withOption =
     option: k:

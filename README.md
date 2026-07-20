@@ -81,7 +81,7 @@ HA), see [Hardware bring-up](docs/hardware.md).
 ### YubiKey / FIDO2 (optional, recommended)
 
 `--ssh-key` accepts a FIDO2 public key (`ed25519-sk` / `ecdsa-sk`) as well as a software key, so you can
-install straight onto hardware-backed admin auth. Generate one on your laptop , the private key never
+install straight onto hardware-backed admin auth. Generate one on your laptop, the private key never
 leaves the token:
 
 ```bash
@@ -106,8 +106,8 @@ usable hardware key (anti-lockout). On an already-installed node, add a token wi
 
 > **A YubiKey is node access, not vault recovery.** It does not replace or weaken the FROST threshold
 > model. Lose every token and you lose SSH (physical console is the permanent break-glass), never the
-> vault , recovery is still the device quorum.
-
+> vault, recovery is still the device quorum.
+>
 > **Hardened by default, reachable by your key.** The installer image is the hardened profile: no known password, key-only SSH (the `keepadmin` account, your enrolled key), `debugAccess` off, Vaultwarden bound to localhost, signups default-deny. During bring-up SSH is reachable on the LAN (`keepNode.adminAccess.lanBringup`) because a fresh node has no mesh yet; once it joins the mesh you redeploy mesh-only. See [Deployment](docs/deployment.md) for the declarative multi-node + admin-access how-to. The legacy `keepnode-debug` profile (known root password, password SSH, open signups) still exists as an explicit opt-in for keyless evaluation, but is never the installed default. `frost-gate` is off, so Vaultwarden data sits on the plain disk with no TPM unlock yet.
 
 ## License
