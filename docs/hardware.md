@@ -92,7 +92,8 @@ seconds when a lag number is available.
   without `frostGate` shows `VAULT n/a`, not `locked`; that is a node that was never gated, not a node
   whose vault failed to open.
 - `unknown` (`○`, `[ ?? ]`) , the probe did not return, or the value could not be determined. `MESH
-  PEERS unknown` means the mesh daemon could not be asked, which is not the same claim as zero peers.
+  LINK unknown` means the interface could not be queried, which is not the same claim as the link
+  being down.
 - `failed` (`×`, `[FAIL]`) , the unit actually failed. An absent unit is never reported this way.
 
 Every state is triple-coded (glyph + word + colour), so the reading survives a monochrome panel, a
@@ -102,17 +103,20 @@ colourblind reader, a serial capture and a photograph.
 collection cadence of 5), a red full-width banner appears and **every collected value on the screen is
 replaced by `??`** , not dimmed, not greyed, not left showing its last reading. A greyed-out `UNLOCKED`
 is still read as "unlocked" by someone glancing across the room, and if the collector has stopped, the
-screen no longer knows whether that is true. Only the last-known timestamp (in the footer), the
-hostname and the SSH line survive, because those are static config rather than collected facts. Seeing
-`??` everywhere means the collector is not producing snapshots; check
-`journalctl -u keep-node-status-collect`. Note that the node label blanks with everything else, so a
-stale screen does not tell you which box you are looking at , the SSH line at the foot does.
+screen no longer knows whether that is true. Only the last-known timestamp (in the footer) and the SSH
+line survive, because those are static config rather than collected facts. The node label is a
+collected value and blanks with everything else, so a stale screen does not tell you which box you are
+looking at , the SSH line at the foot does, since it carries the hostname (when admin SSH is
+configured). Seeing `??` everywhere means the collector is not producing snapshots; check
+`journalctl -u keep-node-status-collect`.
 
 **Anti-lockout renders as a full-width alarm**, not just a row. `nixos/admin-access.nix:198` writes its
-"NO authorized SSH key" warning directly to `/dev/console` , the same VT the renderer owns , so a
-repaint would erase it within a second. It is re-raised here as a banner pinned above the fold, where
-the row-budget fitter can never drop or scroll it. If you see it, the box has no admin key and remote
-access is impossible; provision one before you walk away.
+"NO authorized SSH key" warning directly to `/dev/console`. On a default install that is the same VT
+the renderer owns, so a repaint would erase it within a second; with a serial console, or with the
+display moved off whatever VT `/dev/console` maps to, the warning simply lands somewhere the operator
+at the monitor never sees. It is re-raised here as a banner pinned above the fold, where the row-budget
+fitter can never drop or scroll it. If you see it, the box has no admin key and remote access is
+impossible; provision one before you walk away.
 
 The anti-lockout row carries **the age of its own verdict** (`active (checked 3d ago)`), and you should
 read that age, not just the colour. `keep-node-admin-key-check` is a `Type=oneshot` +
@@ -120,26 +124,28 @@ read that age, not just the colour. `keep-node-admin-key-check` is a `Type=onesh
 *after* boot does not re-trigger it, so a green anti-lockout row on a long-uptime node means "no lockout
 as of that many days ago", not "no lockout now". To re-verify on demand:
 
-```
+```bash
 systemctl restart keep-node-admin-key-check.service
 ```
 
 The screen picks the new verdict, and the reset age, up within one collector cycle.
 
-**If the status screen is blank or dead, use another VT.** Press **Alt+F2** (through Alt+F6) for a normal
-login prompt; the status display only ever takes over its own VT and tty2-6 keep their gettys. This
-matters because the renderer's VT has *no* getty to fall back to , `getty@` and `autovt@` for that
-terminal are disabled, which NixOS implements by masking them, so `systemctl start getty@tty1` will
-refuse. Alt+F2 is the recovery path at the keyboard. (Those prompts grant nothing by themselves: every
-account is password-locked, so you still need a key-based SSH session, or physical media, to do
-anything.) From there, `systemctl status keep-node-status-render` and
+**If the status screen is blank or dead, use another VT.** The display only ever takes over the VT named
+by `keepNode.statusDisplay.tty`; every other VT keeps its getty. At the default `tty = 1`, press
+**Alt+F2** (through Alt+F6) for a normal login prompt , if you moved the display, that VT is the one to
+avoid and any other Alt+F<n> works. This matters because the display's VT has *no* getty to fall back
+to , `getty@` and `autovt@` for that terminal are disabled, which NixOS implements by masking them, so
+`systemctl start getty@tty<n>` for that VT will refuse. Switching to another VT is the recovery path at
+the keyboard. (Those prompts grant nothing by themselves: every account is password-locked, so you
+still need a key-based SSH session, or physical media, to do anything.) From there,
+`systemctl status keep-node-status-render` and
 `journalctl -u keep-node-status-render` say why the screen is not painting.
 
 **Conflict with `debugAccess`.** `keepNode.debugAccess` sets `services.getty.autologinUser = "root"`,
 which claims tty1. Enabling both with `statusDisplay.tty = 1` is a build-time assertion failure, not a
 runtime surprise. Remedy: either disable `keepNode.debugAccess` (the production posture), or move the
 screen to a free VT with `keepNode.statusDisplay.tty = 2`. The status display takes over only its own
-VT , tty2-6 keep their normal gettys, which grant nothing anyway since every account is
+VT , every other VT keeps its normal getty, which grants nothing anyway since every account is
 password-locked.
 
 Untested on real hardware: this is CI-tested in NixOS VMs like the rest of the tree, so treat the first

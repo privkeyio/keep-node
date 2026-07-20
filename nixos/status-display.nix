@@ -847,8 +847,10 @@ let
       # THE staleness rule. Every collected value is REPLACED by "??" -- not dimmed, not greyed, not
       # kept as a last-known reading. A greyed-out "UNLOCKED" is still read as "unlocked" by someone
       # glancing at the screen from across the room, and the whole point of this display is what it
-      # tells that person. Only the last-known TIMESTAMP survives (in the footer), plus the hostname and
-      # the SSH line, which are static config rather than collected facts.
+      # tells that person. Only the last-known TIMESTAMP (in the footer) and the SSH line survive, being
+      # static config rather than collected facts. The node label is NOT among them -- it is collected,
+      # so it blanks with everything else and a stale screen cannot tell you which box you are looking
+      # at. The SSH line is what identifies the node then.
       if [ "$degraded" -eq 1 ]; then
         v_node="??"
         v_vault="??"
