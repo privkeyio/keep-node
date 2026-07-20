@@ -89,6 +89,27 @@ true of all full-disk encryption. The quorum protects the key at rest and gates 
 unlock on a second holder; it does not protect a live, compromised, running system. Keep
 Node does not claim to.
 
+### A stolen operator laptop
+
+Admin access is key-only SSH as `keepadmin`, reachable only over the mesh. With a software key, that
+key is a **file**: an attacker who takes the laptop, or lands malware on it, inherits full node admin
+(including passwordless sudo), silently and replayably, for as long as the key exists.
+
+`keepNode.security.yubikey` narrows that. With a FIDO2 credential (`ed25519-sk` / `ecdsa-sk`) the
+private key lives in the token's secure element and cannot be extracted or copied, and
+`verify-required` makes every single authentication need a PIN *and* a physical touch. Possession of
+the laptop stops being sufficient; remote malware cannot authenticate without the operator physically
+present at the token. `requireHardwareKey = true` enforces this at sshd (`PubkeyAcceptedAlgorithms`
+restricted to `sk-` algorithms), so a software key is refused by the daemon rather than merely absent
+from a file.
+
+The boundary: this protects the *authentication*, not a session already established. An attacker who
+compromises the laptop while the operator is logged in can act inside that live session; the touch
+requirement bounds the damage to the moments the operator is present, and the credential cannot be
+stolen for later use. It is also strictly node access , it does not gate the vault, whose protection is
+the FROST quorum above. Losing every token costs SSH (physical console is the break-glass), never the
+vault.
+
 ### Duress and coercion
 
 The quorum protects against theft and remote compromise. It does not, on its own, protect
