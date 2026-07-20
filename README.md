@@ -92,8 +92,8 @@ keepNode.statusDisplay.enable = true;   # optional: tty = 2, nodeLabel = "vault-
 
 It is a pane of glass, not a console. It accepts **no input** (the renderer runs unprivileged with
 `StandardInput=null`, so it holds no descriptor on the keyboard), reaches no shell, and grants nothing
-that physical presence didn't already grant. The mesh address and peer count are separate opt-ins
-(`showMeshAddress`, `showMeshPeers`) because they are network topology shown to whoever is standing
+that physical presence didn't already grant. The mesh address is a separate opt-in
+(`showMeshAddress`) because it is network topology shown to whoever is standing
 there. Operator detail in [Hardware bring-up](docs/hardware.md#console-status-display-optional);
 threat model in [Security](docs/SECURITY.md).
 

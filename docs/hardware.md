@@ -68,8 +68,7 @@ keepNode.statusDisplay = {
   enable = true;          # off by default
   tty = 1;                # which VT it owns (1-12); 1 is what a plugged-in monitor shows on boot
   nodeLabel = "vault-rack-3";   # defaults to config.networking.hostName
-  # showMeshAddress = true;     # both default false, see below
-  # showMeshPeers = true;
+  # showMeshAddress = true;     # defaults false, see below
 };
 ```
 
@@ -83,7 +82,7 @@ paints the VT). Neither binary is on your `$PATH`; to debug the screen from an S
 data dir is mounted from something that is not the gate's mapper). `GATE`, `VAULTWARDEN`, `MESH`,
 `WISP` and `ANTI-LOCKOUT` are the systemd states of the corresponding units. `MESH LINK` appears only
 when `keepNode.mesh.enable` is on, and reads the interface's `UP` flag (not its `state` word, which
-sits at `UNKNOWN` on a healthy tun device). `MESH ADDR` and `MESH PEERS` appear only when you opt in.
+sits at `UNKNOWN` on a healthy tun device). `MESH ADDR` appears only when you opt in.
 `REPLICATION` appears only when `keepNode.vaultReplication.role` is set, and shows the role plus lag in
 seconds when a lag number is available.
 

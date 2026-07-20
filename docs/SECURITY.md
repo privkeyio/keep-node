@@ -113,10 +113,9 @@ A Wayland kiosk was evaluated and rejected for this reason: `foot` binds `ctrl+s
 keyboard input consumer to an appliance that deliberately has neither.
 
 What the screen does change is what an attacker at the box can *read*. Vault state, service health and
-the node label are visible to anyone in the room. The mesh address and the peer count are therefore
-separate opt-ins (`showMeshAddress`, `showMeshPeers`, both default false): those are topology
-intelligence, and a peer count is a fact about the whole cluster rather than about this box. Enable
-them only where the console itself is in a trusted location.
+the node label are visible to anyone in the room. The mesh address is therefore a
+separate opt-in (`showMeshAddress`, default false): that is topology intelligence rather than a
+health fact. Enable it only where the console itself is in a trusted location.
 
 This display does not touch the threshold model, adds no password path, opens no port, and introduces
 no network-reachable daemon. It has been tested in NixOS VMs, not on hardware.

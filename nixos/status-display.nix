@@ -47,14 +47,7 @@ let
   gateMapper = config.keepNode.frostGate.mapperName or "keep-vault";
   meshEnabled = config.keepNode.mesh.enable or false;
   meshInterface = config.keepNode.mesh.interface or "";
-  meshStateDir = config.keepNode.mesh.stateDir or "";
-  meshPackage = config.keepNode.mesh.package or null;
   replRole = config.keepNode.vaultReplication.role or null;
-
-  # The peer probe additionally needs the nvpn binary, which keepNode.mesh.package leaves null until an
-  # operator supplies it. Without it there is nothing to ask, so the field stays null rather than
-  # reporting a peer count of zero -- "no peers" and "cannot tell" are different facts.
-  peerProbeUsable = cfg.showMeshPeers && meshEnabled && meshPackage != null && meshStateDir != "";
 
   statusDir = "/run/keep-node-status";
   statusFile = "${statusDir}/status.json";
@@ -85,20 +78,6 @@ let
 
   shellList = xs: lib.concatMapStringsSep " " lib.escapeShellArg xs;
 
-  # The peer probe spawns a network-touching binary (documented under showMeshPeers), so it runs on a
-  # slower cadence than the rest of the round and its result is cached between passes: peer
-  # reachability moves on mesh-convergence timescales, not on the collector's.
-  #
-  # But the cache TTL is CLAMPED below staleSeconds, and that clamp is load-bearing. The renderer's
-  # staleness rule is a promise about the whole frame: anything not blanked to "??" is no older than
-  # staleSeconds. An unclamped 4x refreshSeconds breaks that promise for exactly one field -- the
-  # blessed staleSeconds=15/refreshSeconds=5 pairing gives a 20s peer TTL inside a 15s budget, so
-  # MESH PEERS could paint a green count from before the staleness limit on a snapshot the renderer
-  # considers entirely fresh. The assertion only bounds staleSeconds against refreshSeconds and cannot
-  # see this, so the bound is applied here instead. staleSeconds > refreshSeconds >= 1 keeps the
-  # subtraction at 1 or above, so the clamp can never drive the interval to zero.
-  peersIntervalSeconds = lib.max 1 (lib.min (4 * cfg.refreshSeconds) (cfg.staleSeconds - 1));
-
   collector = pkgs.writeShellScriptBin "keep-node-status-collect" ''
     set -euo pipefail
 
@@ -128,7 +107,6 @@ let
     repl_lag_check=unknown
     mesh_up=false
     mesh_addr=""
-    peers_json=null
     lag_json=null
 
     is_uint() {
@@ -293,37 +271,6 @@ let
       mesh_addr="$(run ${pkgs.iproute2}/bin/ip -o -4 addr show dev "$mesh_iface" 2>/dev/null | ${pkgs.gawk}/bin/awk 'NR==1{split($4,a,"/"); print a[1]}' || true)"
     ''}
 
-    ${lib.optionalString peerProbeUsable ''
-      # Only a COUNT of peers the mesh daemon currently knows an address for -- never the addresses
-      # themselves and never the npubs. A count is the reachability fact an operator at the box needs;
-      # the roster is a map of the whole cluster and stays off the glass even with showMeshPeers on.
-      peers_cache="$dir/peers.cache"
-      peers_fresh=0
-      if [ -r "$peers_cache" ]; then
-        cached_at="$(${pkgs.gawk}/bin/awk 'NR==1{print $1}' "$peers_cache" 2>/dev/null || true)"
-        cached_n="$(${pkgs.gawk}/bin/awk 'NR==1{print $2}' "$peers_cache" 2>/dev/null || true)"
-        if is_uint "$cached_at" && is_uint "$cached_n" &&
-          [ "$(( now - cached_at ))" -lt ${toString peersIntervalSeconds} ] &&
-          [ "$(( now - cached_at ))" -ge 0 ]; then
-          peers_json="$cached_n"
-          peers_fresh=1
-        fi
-      fi
-      if [ "$peers_fresh" -eq 0 ]; then
-        # The probe's EXIT STATUS is checked before its output is counted. Counting the lines of a
-        # failed probe would print 0 and report "zero peers" -- a definite claim -- when the truth is
-        # "the daemon could not be asked". Those are different facts and the field distinguishes them:
-        # a real 0, or null.
-        if peer_out="$(HOME=${lib.escapeShellArg meshStateDir} run ${lib.getExe meshPackage} ip --peer --discover-secs 0 2>/dev/null)"; then
-          peer_n="$(printf '%s\n' "$peer_out" | ${pkgs.gawk}/bin/awk 'NF{n++} END{print n+0}' || true)"
-          if is_uint "$peer_n"; then
-            peers_json="$peer_n"
-            printf '%s %s\n' "$now" "$peer_n" > "$peers_cache" || true
-          fi
-        fi
-      fi
-    ''}
-
     ${lib.optionalString (replRole == "standby") ''
       # keep-node-vault-lag-check logs exactly one line per run; its unit state is the pass/fail signal
       # and this recovers the NUMBER behind it so the screen can show how far behind the standby is.
@@ -366,7 +313,6 @@ let
       --arg mesh_iface "$mesh_iface" \
       --argjson mesh_up "$mesh_up" \
       --arg mesh_addr "$mesh_addr" \
-      --argjson mesh_peers "$peers_json" \
       --arg repl_role "$repl_role" \
       --arg repl_lag_check "$repl_lag_check" \
       --argjson repl_lag "$lag_json" \
@@ -381,8 +327,7 @@ let
          mesh: {
            interface: (if $mesh_iface == "" then null else $mesh_iface end),
            up: $mesh_up,
-           address: (if $mesh_addr == "" then null else $mesh_addr end),
-           peers: $mesh_peers
+           address: (if $mesh_addr == "" then null else $mesh_addr end)
          },
          replication: {
            role: (if $repl_role == "" then null else $repl_role end),
@@ -422,7 +367,6 @@ let
       (.mesh.interface | s),
       (.mesh.up | s),
       (.mesh.address | s),
-      (.mesh.peers | s),
       (.replication.role | s),
       (.replication.lag_check | s),
       (.replication.lag_seconds | s),
@@ -447,7 +391,6 @@ let
     ssh_note=${lib.escapeShellArg sshNote}
     show_mesh_link=${if meshEnabled then "1" else "0"}
     show_mesh_addr=${if cfg.showMeshAddress then "1" else "0"}
-    show_mesh_peers=${if cfg.showMeshPeers then "1" else "0"}
     show_repl=${if replRole != null then "1" else "0"}
 
     mark_unicode=(${shellList brand.markUnicode})
@@ -725,7 +668,6 @@ let
       v_iface=""
       v_up=""
       v_addr=""
-      v_peers=""
       v_role=""
       v_lagchk=""
       v_lag=""
@@ -753,7 +695,7 @@ let
       # completely plausible on screen. The LAST element is a "." sentinel purely so that a trailing
       # EMPTY field cannot be eaten by command substitution's newline stripping and fake a short list.
       line_count="$(printf '%s\n' "$json" | ${pkgs.coreutils}/bin/wc -l)"
-      if [ "$line_count" -ne 19 ]; then
+      if [ "$line_count" -ne 18 ]; then
         degraded=1
         degrade_reason="STATUS SNAPSHOT UNREADABLE - UNEXPECTED SHAPE"
         last_ts="$(fmt_time "$mtime")"
@@ -772,7 +714,6 @@ let
         read -r v_iface
         read -r v_up
         read -r v_addr
-        read -r v_peers
         read -r v_role
         read -r v_lagchk
         read -r v_lag
@@ -918,7 +859,6 @@ let
         v_iface="??"
         v_up="??"
         v_addr="??"
-        v_peers="??"
         v_role="??"
         v_lagchk="??"
         v_lag="??"
@@ -992,16 +932,6 @@ let
           add_item ok "MESH ADDR" "$v_addr"
         else
           add_item unknown "MESH ADDR" unknown
-        fi
-      fi
-      if [ "$show_mesh_peers" = 1 ]; then
-        if [ "$degraded" -eq 1 ]; then
-          add_item unknown "MESH PEERS" "$v_peers"
-        elif is_uint "$v_peers"; then
-          add_item ok "MESH PEERS" "$v_peers"
-        else
-          # null, not 0: the collector could not ask the daemon. "Zero peers" is a claim; this is not.
-          add_item unknown "MESH PEERS" unknown
         fi
       fi
       if [ "$show_repl" = 1 ]; then
@@ -1284,31 +1214,6 @@ in
       '';
     };
 
-    showMeshPeers = lib.mkOption {
-      type = lib.types.bool;
-      default = false;
-      description = ''
-        Show mesh peer reachability on the status screen. Only a COUNT is ever displayed , never peer
-        addresses and never npubs.
-
-        Off by default for the same reason as `showMeshAddress`, and more so: a peer count is a fact
-        about the whole mesh handed to anyone standing at the box, not just a fact about this node.
-
-        Understand the cost before enabling it, because it is not merely a cadence question. Turning
-        this on makes the collector, which runs AS ROOT, execute the mesh daemon binary
-        (`keepNode.mesh.package`) with real network access on every slow pass, and then PARSE ITS
-        OUTPUT. That is the largest privileged attack surface this module has: with the option off the
-        collector opens no internet socket at all (`RestrictAddressFamilies` admits only `AF_UNIX` and
-        `AF_NETLINK`), and with it on `AF_INET`/`AF_INET6` are necessarily readmitted.
-
-        The mitigations that are in place: the probe is wrapped in `probeTimeoutSeconds`, its result is
-        cached so it runs on a slower cadence than the rest of the round rather than on every pass, its
-        exit status is checked before its output is counted, and the only value taken from that output
-        is a line count validated as an unsigned integer. Leave it off unless the peer count genuinely
-        earns that exposure during bring-up.
-      '';
-    };
-
     nodeLabel = lib.mkOption {
       type = lib.types.str;
       default = config.networking.hostName;
@@ -1350,24 +1255,11 @@ in
         message = "keepNode.statusDisplay.repaintSeconds (${toString cfg.repaintSeconds}) must be less than staleSeconds (${toString cfg.staleSeconds}): the renderer draws the STALE banner, so if it repaints less often than the staleness window it keeps showing a healthy-looking frozen screen for a full repaint period after the collector dies. Lower repaintSeconds below staleSeconds (the default 1 is fine).";
       }
       {
-        # The mesh fields have nothing to read when the mesh module is off. They would render a
+        # The mesh address has nothing to read when the mesh module is off. It would render a
         # permanent "n/a", which on a status screen looks like a FAULT rather than a disabled feature,
         # and sends the operator chasing a mesh problem that does not exist.
-        assertion = (cfg.showMeshAddress || cfg.showMeshPeers) -> (config.keepNode.mesh.enable or false);
-        message = "keepNode.statusDisplay.showMeshAddress or showMeshPeers is true but keepNode.mesh.enable is false: there is no mesh to report on, so those fields would render a permanent \"n/a\" that reads as a fault and sends the operator chasing a non-existent mesh problem. Enable keepNode.mesh, or leave the mesh fields off.";
-      }
-      {
-        # The peer cache TTL is clamped under staleSeconds to keep the freshness promise, so tightening
-        # staleSeconds also tightens the TTL. Past the point where the TTL falls to refreshSeconds the
-        # cache can never hit, and the peer probe -- which runs the mesh binary AS ROOT WITH NETWORK
-        # ACCESS -- executes on every single round instead of the "slower cadence" its own option
-        # description promises. That is a silent 4x increase in privileged network execution bought by
-        # an option that looks purely like a display tweak, so it is refused at build time rather than
-        # discovered in a journal.
-        assertion = peerProbeUsable -> (cfg.staleSeconds > 2 * cfg.refreshSeconds);
-        message = "keepNode.statusDisplay.showMeshPeers is true but staleSeconds (${toString cfg.staleSeconds}) is not more than twice refreshSeconds (${toString cfg.refreshSeconds}): the peer cache is clamped below staleSeconds, so at this ratio it can never be reused and the root, network-touching peer probe would run on every collection round. Raise staleSeconds above ${
-          toString (2 * cfg.refreshSeconds)
-        }, lower refreshSeconds, or turn showMeshPeers off.";
+        assertion = cfg.showMeshAddress -> (config.keepNode.mesh.enable or false);
+        message = "keepNode.statusDisplay.showMeshAddress is true but keepNode.mesh.enable is false: there is no mesh to report on, so the field would render a permanent \"n/a\" that reads as a fault and sends the operator chasing a non-existent mesh problem. Enable keepNode.mesh, or leave showMeshAddress off.";
       }
     ];
 
@@ -1391,7 +1283,7 @@ in
         RuntimeDirectoryPreserve = "yes";
         UMask = "0022";
         # Sandboxing mirrors nixos/mesh.nix:440-468. This unit runs as root only because it reads
-        # unit state and the mesh daemon's private state dir; it needs no capability at all, writes
+        # unit state and the vault gate's device mapping; it needs no capability at all, writes
         # exactly one directory, and must not be a lever if anything it shells out to misbehaves.
         # No PrivateNetwork: `ip` must observe the HOST network namespace or every mesh fact it
         # reports would describe an empty private netns instead of the real interface.
@@ -1405,16 +1297,11 @@ in
         # the journal over unix sockets) and AF_NETLINK (how ip(8) actually asks the kernel about
         # links and addresses -- without it every mesh fact reads as unknown).
         #
-        # AF_INET/AF_INET6 are admitted ONLY when the peer probe is compiled in, because that probe is
-        # the one thing here that genuinely talks to a network. With showMeshPeers off -- the default
-        # -- this root unit cannot open an internet socket at all.
+        # Nothing else is admitted: no probe here talks to a network, so this root unit cannot open an
+        # internet socket at all.
         RestrictAddressFamilies = [
           "AF_UNIX"
           "AF_NETLINK"
-        ]
-        ++ lib.optionals peerProbeUsable [
-          "AF_INET"
-          "AF_INET6"
         ];
         SystemCallFilter = [ "@system-service" ];
         SystemCallArchitectures = "native";

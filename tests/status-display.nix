@@ -189,7 +189,7 @@ in
           "'{schema:1, generated_at:$generated_at, node:\"agetest\", "
           "vault:{state:\"unlocked\",gate:\"active\"}, "
           "services:{vaultwarden:\"active\",mesh:\"n/a\",wisp:\"n/a\"}, "
-          "mesh:{interface:null,up:false,address:null,peers:null}, "
+          "mesh:{interface:null,up:false,address:null}, "
           "replication:{role:null,lag_check:\"n/a\",lag_seconds:null}, "
           "anti_lockout:\"active\", anti_lockout_checked_at:$checked_at}' > /tmp/al_old.json"
       )
@@ -482,7 +482,7 @@ in
           "'{schema:1, generated_at:$generated_at, node:$node, "
           "vault:{state:\"unlocked\",gate:\"active\"}, "
           "services:{vaultwarden:\"active\",mesh:\"n/a\",wisp:\"n/a\"}, "
-          "mesh:{interface:null,up:false,address:null,peers:null}, "
+          "mesh:{interface:null,up:false,address:null}, "
           "replication:{role:null,lag_check:\"n/a\",lag_seconds:null}, "
           "anti_lockout:\"active\"}' > /tmp/evil.json"
       )
@@ -607,8 +607,11 @@ in
       )
 
       # Non-vacuity for the collector-fault case specifically: prove the snapshot is NOT stale, so the
-      # banner above came from reading .error and not from the age check firing by luck.
-      box.succeed("jq -e '(now - .generated_at) < 5' /tmp/deg_collector.json >/dev/null")
+      # banner above came from reading .error and not from the age check firing by luck. The bound is
+      # 15s, not a tight few: several renders run between the fixture's `date +%s` stamp and this
+      # check, which on a contended hypervisor overran a 5s window. staleSeconds is 30 on this node,
+      # so 15 still proves staleness did not fire.
+      box.succeed("jq -e '(now - .generated_at) < 15' /tmp/deg_collector.json >/dev/null")
 
       # ---------------------------------------------------------------------------------------------
       # Banner text WRAPS, never slices. At w=40 the inner width is 34 and the notice is 41 characters,

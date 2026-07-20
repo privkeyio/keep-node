@@ -446,10 +446,7 @@
             staleSeconds = 20;
           };
         }).success
-        # Mesh fields requested with no mesh: permanent "n/a" that reads as a fault. Both fields are
-        # covered because the assertion joins them with `||`: a fixture for only one of them passes
-        # just as well against a guard that had been narrowed to that single option.
-        && !(statusDisplayToplevelEvals { statusDisplay.showMeshPeers = true; }).success
+        # The mesh address requested with no mesh: permanent "n/a" that reads as a fault.
         && !(statusDisplayToplevelEvals { statusDisplay.showMeshAddress = true; }).success;
 
       # Pure-eval guard for the console brand mark. The status display and the installer MOTD frame a
@@ -799,10 +796,8 @@
             }).success
           then
             "echo 'statusDisplay repaint guard regression: repaintSeconds was accepted at or above staleSeconds -- the renderer draws the STALE banner, so a healthy-looking frozen screen would persist for a full repaint period after the collector died' >&2; exit 1"
-          else if (statusDisplayToplevelEvals { statusDisplay.showMeshPeers = true; }).success then
-            "echo 'statusDisplay mesh-field guard regression: showMeshPeers was accepted with keepNode.mesh.enable false -- the peer roster would render a permanent \"n/a\" that reads as a fault and sends the operator chasing a non-existent mesh problem' >&2; exit 1"
           else if (statusDisplayToplevelEvals { statusDisplay.showMeshAddress = true; }).success then
-            "echo 'statusDisplay mesh-field guard regression: showMeshAddress was accepted with keepNode.mesh.enable false -- the assertion covers both mesh fields via ||, so a guard narrowed to showMeshPeers alone still passes the peers fixture while letting this one through' >&2; exit 1"
+            "echo 'statusDisplay mesh-field guard regression: showMeshAddress was accepted with keepNode.mesh.enable false -- the mesh address row would render a permanent \"n/a\" that reads as a fault and sends the operator chasing a non-existent mesh problem' >&2; exit 1"
           else if !statusDisplayBadConfigsRejected then
             "echo 'statusDisplay guard regression: a config the fixtures expect to be rejected evaluated successfully, but no chained case above named it -- a fixture was added to statusDisplayBadConfigsRejected without its own diagnostic' >&2; exit 1"
           else
