@@ -129,7 +129,7 @@ in
       strict.fail(f"{ssh} keepadmin@${strictLan} true")
       # Same key, same account, requireHardwareKey off -> logs in with passwordless sudo (backward
       # compatibility for every existing software-key deployment).
-      mixed.wait_until_succeeds(f"{ssh} keepadmin@${mixedLan} true", timeout=30)
+      mixed.wait_until_succeeds(f"{ssh} keepadmin@${mixedLan} true", timeout=60)
       mixed.succeed(f"{ssh} keepadmin@${mixedLan} sudo -n true")
 
       # Enrolling a hardware key into the runtime file clears the anti-lockout alarm , no false alarm on

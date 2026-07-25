@@ -8,8 +8,10 @@
 # operator physically present.
 #
 # This is NODE ACCESS ONLY. It does not touch, replace, or weaken the FROST threshold model: vault
-# recovery is still the device quorum, and losing every YubiKey costs SSH access (physical console is
-# the permanent break-glass), never the vault.
+# recovery is still the device quorum, and losing every YubiKey costs SSH access, never the vault. The
+# permanent break-glass is PHYSICAL access to re-provision the node (boot/recovery media re-enrolls a
+# key or reinstalls), not a console login: production leaves no getty autologin and keepadmin/root have
+# no password, so a physical console shows no login prompt.
 #
 # Backward compatible by construction: the module is off by default, and with `requireHardwareKey`
 # false (the default) sshd's accepted-algorithm set is untouched, so existing software keys keep
