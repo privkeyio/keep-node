@@ -378,6 +378,167 @@
           authorizedKeysFile = "";
         }).success;
 
+      # Pure-eval guards for the YubiKey / FIDO2 module (issue #99). The security value is in what the
+      # module REFUSES, so each case forces the system toplevel under tryEval: a fired assertion becomes
+      # success=false, without booting a VM. `settings` is read from the same fixture so the sshd policy
+      # (sk-only algorithms + verify-required) is checked alongside the guards that keep it reachable.
+      yubikeySystem =
+        {
+          yubikeyKeys ? [ skFixtureKey ],
+          adminKeys ? [ ],
+          authorizedKeysFile ? null,
+          requireHardwareKey ? false,
+          # The yubikey module only shapes the account adminAccess defines, so "adminAccess off" is a
+          # posture the guards must cover, not an unrelated fixture.
+          adminAccess ? true,
+          extra ? { },
+        }:
+        nixpkgs.lib.nixosSystem {
+          inherit system;
+          modules = [
+            ./nixos/admin-access.nix
+            ./nixos/yubikey.nix
+            {
+              fileSystems."/" = {
+                device = "/dev/disk/by-label/root";
+                fsType = "ext4";
+              };
+              boot.loader.grub.enable = false;
+              networking.firewall.enable = true;
+              keepNode.adminAccess = {
+                enable = adminAccess;
+                authorizedKeys = adminKeys;
+                inherit authorizedKeysFile;
+              };
+              keepNode.security.yubikey = {
+                enable = true;
+                authorizedKeys = yubikeyKeys;
+                inherit requireHardwareKey;
+              }
+              // extra;
+            }
+          ];
+        };
+      yubikeyEvals = args: builtins.tryEval (yubikeySystem args).config.system.build.toplevel.drvPath;
+      # The two postures every non-guard check reads: sk-only enforcement, and the default (mixed) mode
+      # that must stay backward compatible with software keys.
+      yubikeyStrict = (yubikeySystem { requireHardwareKey = true; }).config;
+      yubikeyMixed = (yubikeySystem { }).config;
+      skFixtureKey = "sk-ssh-ed25519@openssh.com AAAAeval-only-fixture-key yubikey-eval";
+      softwareFixtureKey = "ssh-ed25519 AAAAeval-only-fixture-key keepadmin-eval";
+
+      yubikeyGuardsHold =
+        # Control: a hardware key alone builds, and so does the strict posture backed by one.
+        (yubikeyEvals { }).success
+        && (yubikeyEvals { requireHardwareKey = true; }).success
+        # A SOFTWARE key under the hardware namespace is refused: it would present a copyable file-based
+        # key to the operator as YubiKey-protected.
+        && !(yubikeyEvals { yubikeyKeys = [ softwareFixtureKey ]; }).success
+        # Anti-lockout: sk-only enforcement with only a software key (and no runtime keys file) leaves
+        # sshd with nothing it will accept and password auth off , a permanent remote lockout.
+        && !(yubikeyEvals {
+          yubikeyKeys = [ ];
+          adminKeys = [ softwareFixtureKey ];
+          requireHardwareKey = true;
+        }).success
+        # ...and the same config is accepted once the runtime authorizedKeysFile escape exists, since a
+        # key is provisioned into it after the build (install-keepnode / keepnode-enroll-yubikey).
+        && (yubikeyEvals {
+          yubikeyKeys = [ ];
+          adminKeys = [ softwareFixtureKey ];
+          requireHardwareKey = true;
+          authorizedKeysFile = "/etc/keepnode/admin_authorized_keys";
+        }).success
+        # A hardware key of a type EXCLUDED by keyTypes does not satisfy the guard: sshd would refuse
+        # that algorithm at auth time, so it is a lockout dressed up as a hardware key.
+        && !(yubikeyEvals {
+          requireHardwareKey = true;
+          extra.keyTypes = [ "ecdsa-sk" ];
+        }).success
+        && (yubikeyEvals {
+          requireHardwareKey = true;
+          extra.keyTypes = [ "ed25519-sk" ];
+        }).success
+        # An empty keyTypes under enforcement would emit an EMPTY PubkeyAcceptedAlgorithms, i.e. sshd
+        # accepts no public key at all.
+        && !(yubikeyEvals {
+          requireHardwareKey = true;
+          extra.keyTypes = [ ];
+        }).success
+        # The module hardens the account adminAccess defines, so it must not be enabled alone.
+        && !(yubikeyEvals { adminAccess = false; }).success;
+
+      # Pure-eval table over authorized_keys LINE SHAPES, run directly against the shared classifier the
+      # module's assertions and its keepadmin key set are built on. Every shape here is legal for sshd,
+      # and each one this classifier gets wrong is a security outcome, not a cosmetic one: an
+      # options-prefixed or tab-separated hardware key misread as software is a FALSE build-time lockout,
+      # while an algorithm name lifted out of a free-form comment is a hardware key reported on a node
+      # whose only key sshd refuses. A table is the cheapest place to pin that , the VM test can only
+      # reach these shapes indirectly.
+      authorizedKeyShapesHold =
+        let
+          k = import ./nixos/lib/authorized-keys.nix { lib = nixpkgs.lib; };
+        in
+        k.algorithmOf "sk-ssh-ed25519@openssh.com AAAAfixture yubikey-eval" == "sk-ssh-ed25519@openssh.com"
+        && k.algorithmOf "ssh-ed25519 AAAAfixture keepadmin-eval" == "ssh-ed25519"
+        # Tab-separated fields are legal; splitting on a literal space reads the whole line as one token.
+        && k.isHardwareKey "sk-ssh-ed25519@openssh.com\tAAAAfixture\tyubikey-eval"
+        # An options field precedes the algorithm and is not one.
+        && k.isHardwareKey ''from="10.44.0.0/16" sk-ssh-ed25519@openssh.com AAAAfixture''
+        && k.isHardwareKey "verify-required sk-ssh-ed25519@openssh.com AAAAfixture"
+        # A certificate line's algorithm field is the cert algorithm.
+        &&
+          k.algorithmOf "sk-ssh-ed25519-cert-v01@openssh.com AAAAfixture yubikey-eval"
+          == "sk-ssh-ed25519-cert-v01@openssh.com"
+        # The COMMENT is free-form text that may name an algorithm. It is still a software key.
+        && !(k.isHardwareKey "ssh-ed25519 AAAAfixture my sk-ssh-ed25519@openssh.com backup key")
+        &&
+          k.trimKeys [
+            ""
+            "   "
+            " ssh-ed25519 AAAAfixture "
+          ] == [ "ssh-ed25519 AAAAfixture" ]
+        # Options are ONE comma-separated field before the algorithm. A line that already carries
+        # options must be extended in place: a second space-separated field is unparseable to sshd, so
+        # the key is silently ignored while still counting towards the anti-lockout guards.
+        &&
+          k.withOption "verify-required" ''from="10.44.0.0/16" sk-ssh-ed25519@openssh.com AAAAfixture''
+          == ''verify-required,from="10.44.0.0/16" sk-ssh-ed25519@openssh.com AAAAfixture''
+        &&
+          k.withOption "verify-required" "sk-ssh-ed25519@openssh.com AAAAfixture"
+          == "verify-required sk-ssh-ed25519@openssh.com AAAAfixture"
+        # Idempotent: a line already stating the option is left alone rather than doubled.
+        &&
+          k.withOption "verify-required" "verify-required sk-ssh-ed25519@openssh.com AAAAfixture"
+          == "verify-required sk-ssh-ed25519@openssh.com AAAAfixture";
+
+      yubikeyPostureHolds =
+        let
+          strict = yubikeyStrict.services.openssh.settings;
+          lax = yubikeyMixed.services.openssh.settings;
+          keepadminKeys = yubikeyMixed.users.users.keepadmin.openssh.authorizedKeys.keys;
+        in
+        # Strict: only sk- algorithms are accepted, PIN + touch is required globally, and no software
+        # algorithm survives in the set.
+        strict.PubkeyAcceptedAlgorithms
+        == "sk-ssh-ed25519@openssh.com,sk-ssh-ed25519-cert-v01@openssh.com,sk-ecdsa-sha2-nistp256@openssh.com,sk-ecdsa-sha2-nistp256-cert-v01@openssh.com"
+        && strict.PubkeyAuthOptions == "verify-required"
+        # Backward compatibility: with requireHardwareKey off (the default) sshd's algorithm policy is
+        # NOT touched, so existing software-key deployments negotiate exactly as before, and no global
+        # verify-required is imposed (which would lock those software keys out).
+        && !(lax ? PubkeyAcceptedAlgorithms)
+        && !(lax ? PubkeyAuthOptions)
+        # Even in that mixed mode the hardware key itself still carries per-key verify-required.
+        && keepadminKeys == [ "verify-required ${skFixtureKey}" ];
+
+      # Password auth must stay off in every YubiKey posture: the module may only REMOVE authentication
+      # paths, never add one. Checked on the strict fixture, the one that rewrites sshd's auth policy.
+      yubikeyKeepsPasswordsOff =
+        let
+          s = yubikeyStrict.services.openssh.settings;
+        in
+        s.PasswordAuthentication == false && s.KbdInteractiveAuthentication == false;
+
       # Pure-eval guard for the mesh-interface single source of truth: setting keepNode.mesh.interface
       # once must propagate to every mesh-scoped service's meshInterface, so they cannot drift apart.
       # A refactor that reverts one service to a hardcoded default flips this red.
@@ -522,6 +683,11 @@
               authorizedKeysFile = "/etc/keepnode/admin_authorized_keys";
               lanBringup = true;
             };
+            # Ships `keepnode-enroll-yubikey` (and libfido2) on the installed node so an operator can add
+            # a FIDO2 key after install, when the closure is already fixed. requireHardwareKey stays OFF
+            # here: the box is reached with the software key install-keepnode enrolled, and flipping it on
+            # before a token exists would lock the node out.
+            keepNode.security.yubikey.enable = true;
           }
         ];
       };
@@ -654,6 +820,37 @@
           else
             "echo 'adminAccess anti-lockout regression: the module either built with no usable key (empty or whitespace-only authorizedKeys and no authorizedKeysFile, a permanent key-only-SSH remote lockout) or refused a valid config (a real inline key, or the installer authorizedKeysFile escape)' >&2; exit 1"
         );
+        yubikey-ssh = pkgs.testers.runNixOSTest {
+          imports = [ ./tests/yubikey-ssh.nix ];
+          _module.args = { inherit adminKeyFixture; };
+        };
+        yubikey-assertions = pkgs.runCommand "yubikey-assertions" { } (
+          if !yubikeyGuardsHold then
+            "echo 'YubiKey module guard regression: the module either accepted a software key under keepNode.security.yubikey.authorizedKeys (a copyable key masquerading as hardware-backed), accepted requireHardwareKey with no usable sk- key of an allowed type and no runtime authorizedKeysFile (a permanent key-only-SSH remote lockout), accepted an empty keyTypes (an empty PubkeyAcceptedAlgorithms accepts nothing), enabled without adminAccess, or refused a valid config' >&2; exit 1"
+          else if !yubikeyPostureHolds then
+            "echo 'YubiKey sshd posture regression: requireHardwareKey did not narrow PubkeyAcceptedAlgorithms to exactly the sk- algorithms with verify-required, or it leaked that policy into the default (requireHardwareKey off) case and would break existing software-key deployments, or the per-key verify-required option was dropped from the enrolled hardware keys' >&2; exit 1"
+          else if !authorizedKeyShapesHold then
+            "echo 'authorized_keys classifier regression: a legal line shape is misclassified (an options prefix such as from=\"...\" or verify-required, a tab-separated line, a certificate algorithm, or an algorithm name occurring in the free-form comment). A hardware key read as software is a false anti-lockout build failure; a comment read as an algorithm reports a hardware key present on a node whose only key sshd will refuse' >&2; exit 1"
+          else if !yubikeyKeepsPasswordsOff then
+            "echo 'YubiKey module regression: password or keyboard-interactive authentication is no longer disabled under the hardware-key posture. This module may only remove authentication paths, never add one' >&2; exit 1"
+          else
+            "touch $out"
+        );
+        # The FIDO2 posture is worthless if the shipped OpenSSH was built without security-key support:
+        # sk- credentials would simply not be a thing sshd can parse or negotiate, and the failure would
+        # surface only when an operator plugs in a YubiKey. `ssh -Q key` enumerates what the binary was
+        # compiled to understand, so this is a real capability probe of the exact package the module
+        # configures, not an assumption about nixpkgs' build flags.
+        openssh-fido-support = pkgs.runCommand "openssh-fido-support" { } ''
+          ssh="${yubikeyMixed.services.openssh.package}/bin/ssh"
+          for alg in sk-ssh-ed25519@openssh.com sk-ecdsa-sha2-nistp256@openssh.com; do
+            "$ssh" -Q key | grep -qx "$alg" || {
+              echo "OpenSSH FIDO/U2F support regression: the configured openssh package does not support $alg (built without withFIDO), so YubiKey SSH keys cannot be used at all" >&2
+              exit 1
+            }
+          done
+          touch $out
+        '';
         mesh-interface-consolidation = pkgs.runCommand "mesh-interface-consolidation" { } (
           if meshInterfaceInheritance then
             "touch $out"

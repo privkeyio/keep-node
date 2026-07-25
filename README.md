@@ -19,6 +19,7 @@ Part of the [Keep](https://github.com/privkeyio/keep) ecosystem; the node daemon
 - **Threshold custody**: the box holds one FROST share; steal it and get nothing.
 - **Multi-node HA**: nodes sync, so a single failure doesn't take your vault down.
 - **Seedless**: recovery via a device quorum, no 24 words to lose.
+- **Hardware-backed admin**: optional YubiKey/FIDO2 SSH, PIN + touch on every login.
 - **Open**: MIT software on commodity hardware.
 
 ## Quick Start
@@ -77,6 +78,36 @@ HA), see [Hardware bring-up](docs/hardware.md).
 
    To open the Vaultwarden web vault before the mesh is set up, tunnel it over that SSH session (it binds localhost only): `ssh -L 8222:localhost:8222 keepadmin@<node-ip>`, then browse `http://localhost:8222` (localhost is a secure context, so the web vault loads). Then onboard the node onto the encrypted mesh and redeploy with `keepNode.adminAccess.lanBringup = false` for the mesh-only posture.
 
+### YubiKey / FIDO2 (optional, recommended)
+
+`--ssh-key` accepts a FIDO2 public key (`ed25519-sk` / `ecdsa-sk`) as well as a software key, so you can
+install straight onto hardware-backed admin auth. Generate one on your laptop, the private key never
+leaves the token:
+
+```bash
+ssh-keygen -t ed25519-sk -O resident -O verify-required -C yubikey-primary
+```
+
+Enroll **two** tokens (primary + off-site backup), then require them:
+
+```nix
+keepNode.security.yubikey = {
+  enable = true;
+  authorizedKeys = [ "sk-ssh-ed25519@openssh.com AAAA... yubikey-primary" /* ...backup */ ];
+  requireHardwareKey = true;   # sshd then refuses every non-hardware-backed key
+};
+```
+
+`requireHardwareKey` narrows sshd's accepted algorithms to `sk-` only, so a stolen laptop is no longer
+enough to reach the node; `verify-required` puts a PIN and a physical touch on every login. It is off by
+default, so existing software-key deployments are unaffected, and the build refuses to enable it with no
+usable hardware key (anti-lockout). On an already-installed node, add a token with
+`keepnode-enroll-yubikey <sk-pubkey>`. Full walkthrough, including Vaultwarden WebAuthn: [Deployment](docs/deployment.md).
+
+> **A YubiKey is node access, not vault recovery.** It does not replace or weaken the FROST threshold
+> model. Lose every token and you lose SSH (physical console is the permanent break-glass), never the
+> vault, recovery is still the device quorum.
+>
 > **Hardened by default, reachable by your key.** The installer image is the hardened profile: no known password, key-only SSH (the `keepadmin` account, your enrolled key), `debugAccess` off, Vaultwarden bound to localhost, signups default-deny. During bring-up SSH is reachable on the LAN (`keepNode.adminAccess.lanBringup`) because a fresh node has no mesh yet; once it joins the mesh you redeploy mesh-only. See [Deployment](docs/deployment.md) for the declarative multi-node + admin-access how-to. The legacy `keepnode-debug` profile (known root password, password SSH, open signups) still exists as an explicit opt-in for keyless evaluation, but is never the installed default. `frost-gate` is off, so Vaultwarden data sits on the plain disk with no TPM unlock yet.
 
 ## License

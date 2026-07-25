@@ -10,6 +10,7 @@
 { config, lib, ... }:
 let
   cfg = config.keepNode.adminAccess;
+  keyCheck = import ./lib/key-check.nix { inherit lib; };
 in
 {
   imports = [ ./mesh-interface.nix ];
@@ -162,45 +163,19 @@ in
     # brick. This oneshot checks the effective key sources at boot and, if none holds a usable key, fails
     # loudly: a console message an operator sees on the physical box, and a `systemctl --failed` entry.
     # Nothing requires this unit, so its failure surfaces the lockout WITHOUT blocking boot or sshd.
-    systemd.services.keep-node-admin-key-check = {
+    # The key-source loop and the loud-failure tail are shared with the yubikey module's check, so a
+    # key source can never be taught to one of them alone.
+    systemd.services.keep-node-admin-key-check = keyCheck.mkKeyCheck {
       description = "Anti-lockout: fail loudly if keepadmin has no authorized SSH key";
-      wantedBy = [ "multi-user.target" ];
-      after = [ "local-fs.target" ];
-      serviceConfig = {
-        Type = "oneshot";
-        RemainAfterExit = true;
-      };
-      script = ''
-        present=0
-        # Bind the runtime file path to a shell VARIABLE via escapeShellArg, then reference it only as
-        # "$akf". The path is operator config, but embedding it raw in a double-quoted string would let a
-        # value containing $(...) or a backtick run as root at boot; a shell variable's contents are never
-        # re-scanned for command substitution, so this stays safe on any path.
-        ${lib.optionalString (
-          cfg.authorizedKeysFile != null
-        ) "akf=${lib.escapeShellArg (toString cfg.authorizedKeysFile)}"}
-        # The inline `authorizedKeys` land in the Nix-managed per-user file; the runtime
-        # authorizedKeysFile (when configured) is the installer/operator-provisioned path.
-        for f in /etc/ssh/authorized_keys.d/keepadmin ${
-          lib.optionalString (cfg.authorizedKeysFile != null) ''"$akf"''
-        }; do
-          # A usable key is any non-blank, non-comment line.
-          if [ -f "$f" ] && grep -qE '^[[:space:]]*[^#[:space:]]' "$f" 2>/dev/null; then
-            present=1
-          fi
-        done
-        if [ "$present" -eq 0 ]; then
-          msg="KEEP NODE ANTI-LOCKOUT: keepadmin has NO authorized SSH key (inline keys empty${
-            lib.optionalString (cfg.authorizedKeysFile != null) "and $akf is absent/empty"
-          }). Key-only SSH means remote access is IMPOSSIBLE. Provision an admin public key (keepNode.adminAccess.authorizedKeys${
-            lib.optionalString (cfg.authorizedKeysFile != null) "or $akf"
-          }), then: systemctl restart keep-node-admin-key-check.service"
-          echo "$msg" > /dev/console 2>/dev/null || true
-          echo "$msg" >&2
-          exit 1
-        fi
-        echo "keepadmin has at least one authorized SSH key"
-      '';
+      inherit (cfg) authorizedKeysFile;
+      # A usable key is any non-blank, non-comment line.
+      matcher = ''grep -qE '^[[:space:]]*[^#[:space:]]' "$f" 2>/dev/null'';
+      message = "KEEP NODE ANTI-LOCKOUT: keepadmin has NO authorized SSH key (inline keys empty${
+        lib.optionalString (cfg.authorizedKeysFile != null) " and $akf is absent/empty"
+      }). Key-only SSH means remote access is IMPOSSIBLE. Provision an admin public key (keepNode.adminAccess.authorizedKeys${
+        lib.optionalString (cfg.authorizedKeysFile != null) " or $akf"
+      }), then: systemctl restart keep-node-admin-key-check.service";
+      okMessage = "keepadmin has at least one authorized SSH key";
     };
 
     services.openssh = {
