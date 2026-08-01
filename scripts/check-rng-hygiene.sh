@@ -86,14 +86,52 @@ preprocess() {
   for f in $SOURCES; do
     out=$(awk -v fname="$f" -v optout="$OPT_OUT" '
       function trim(s) { sub(/^[ \t]*/, "", s); sub(/[ \t]*$/, "", s); return s }
-      BEGIN { blockopt = 0 }
-      {
-        line = trim($0)
-        p = index($0, "#")
-        code = (p > 0) ? trim(substr($0, 1, p - 1)) : line
-        cmt  = (p > 0) ? substr($0, p) : ""
 
-        if (code == "") { if (index(cmt, optout)) blockopt = 1; next }
+      # Split a line into code and comment, honouring quoting. A naive
+      # index($0, "#") splits `''${#pass}` and, worse, treats a `#` inside a
+      # string as a comment start -- which let `printf "#x"; pass=/dev/urandom`
+      # hide the read, and let an opt-out marker inside a string literal exempt
+      # a line with no comment a reviewer could see.
+      function split_line(s,   i, c, n, q, out) {
+        out = ""; cmt = ""; q = ""
+        n = length(s)
+        for (i = 1; i <= n; i++) {
+          c = substr(s, i, 1)
+          if (q != "") {
+            if (c == "\\") { out = out c substr(s, i + 1, 1); i++; continue }
+            if (c == q) q = ""
+            out = out c
+            continue
+          }
+          if (c == "\"" || c == "'"'"'") { q = c; out = out c; continue }
+          if (c == "#") { cmt = substr(s, i); return out }
+          out = out c
+        }
+        return out
+      }
+
+      BEGIN { blockopt = 0; prose = 0 }
+      {
+        raw = $0
+        code = trim(split_line(raw))
+
+        # Nix option documentation is prose, not code. Without this, a
+        # description mentioning /dev/urandom is a finding, and the only way to
+        # silence it is a marker that renders as literal text in the rendered
+        # option docs.
+        if (prose) {
+          if (raw ~ /(\x27\x27;|\x27\x27[ \t]*$)/) prose = 0
+          next
+        }
+        if (code ~ /(description|example|longDescription)[ \t]*=[ \t]*\x27\x27/ && code !~ /\x27\x27.*\x27\x27[ \t]*;/) {
+          prose = 1
+          next
+        }
+
+        # A blank line ends the comment block, so a marker cannot carry across
+        # unrelated lines to exempt something far below it.
+        if (code == "" && cmt == "") { blockopt = 0; next }
+        if (code == "") { blockopt = (index(cmt, optout) ? 1 : blockopt); next }
         if (index(cmt, optout) || blockopt) { blockopt = 0; next }
         blockopt = 0
         printf "%s:%d:%s\n", fname, FNR, code
@@ -113,6 +151,10 @@ if [ -z "$CODE" ]; then
   exit 1
 fi
 
+# Called from the CALLER, never from inside the command substitution: an `exit`
+# in a substitution terminates only the subshell, so `x=$(scan ...) ` would have
+# swallowed the failure and reported a clean tree. That is the fail-open shape
+# this guard exists to reject.
 scanner_died() {
   printf '\n\033[31mFAIL\033[0m the scanner itself failed; refusing to report a clean tree\n' >&2
   exit 1
@@ -122,7 +164,7 @@ scan() { # $1 = ERE
   printf '%s\n' "$CODE" | awk -v pat="$1" '{
     line = $0; sub(/^[^:]*:[0-9]+:/, "", line)
     if (line ~ pat) print $0
-  }' || scanner_died
+  }'
 }
 
 report() { # $1 = findings, $2 = headline, $3.. = hints
@@ -134,34 +176,42 @@ report() { # $1 = findings, $2 = headline, $3.. = hints
 }
 
 # ------------------------------------------ 1. no non-blocking entropy read ----
-urandom_bad=$(scan '/dev/urandom')
+urandom_bad=$(scan '/dev/urandom') || scanner_died
 report "$urandom_bad" "reads /dev/urandom, which never waits for the kernel CRNG:" \
   'use /dev/random. On Linux >= 5.6 it blocks only until the CRNG is initialised' \
   'and never afterwards, which is the guarantee a first-boot appliance needs.' \
   "Mark a deliberate non-key-material read: # $OPT_OUT - <reason>"
 
 # ------------------------------------------------- 2. no bash seeded PRNG ----
-bashrandom_bad=$(scan '(^|[^a-zA-Z0-9_])RANDOM([^a-zA-Z0-9_]|$)')
+bashrandom_bad=$(scan '(^|[^a-zA-Z0-9_])RANDOM([^a-zA-Z0-9_]|$)') || scanner_died
 report "$bashrandom_bad" "uses bash \$RANDOM, a seeded PRNG:" \
   'fine for retry jitter, never for key material.' \
   "Mark the jitter case: # $OPT_OUT - <reason>"
 
-# ------------------------------ 3. the bootstrap passphrase stays length-checked --
-# The one repo-specific invariant. `head -c 32 /dev/random | base64` exits 0 with
-# a short string if the read is truncated, which would luksFormat the vault
-# volume under a truncated passphrase and carry on. The check is what makes that
-# loud, so it is pinned rather than trusted to survive editing.
-if [ -f nixos/frost-gate.nix ]; then
-  if ! grep -q 'refusing to format' nixos/frost-gate.nix; then
+# ------------------ 3. the bootstrap passphrase draw keeps both its guarantees --
+# The repo-specific invariant, and the one rule that has to check for something
+# being PRESENT rather than absent. Rule 1 only bans /dev/urandom; on its own,
+# replacing the whole draw with `date +%s | sha256sum` leaves CI green.
+#
+# Pinned structurally, not by error message: an earlier version grepped for the
+# text "refusing to format", so deleting the check while leaving the words in a
+# comment passed.
+if [ ! -f nixos/frost-gate.nix ]; then
+  fail "nixos/frost-gate.nix not found; rule 3 cannot run (was the module moved?)"
+else
+  if ! grep -qE 'head -c 32 /dev/random' nixos/frost-gate.nix; then
+    fail "the LUKS bootstrap passphrase no longer reads 32 bytes from /dev/random:"
+    echo "  → this is the only key material this repo mints itself. It must come from"
+    echo "    the source that waits for the kernel CRNG, not from a derived value."
+  fi
+  if ! grep -qE '\-eq 44' nixos/frost-gate.nix; then
     fail "nixos/frost-gate.nix no longer length-checks the LUKS bootstrap passphrase:"
     echo "  → a short entropy read must abort provisioning, not format the volume"
-    echo "    under a truncated passphrase. See the comment above the read."
+    echo "    under a truncated passphrase. base64 of 32 bytes is exactly 44 chars."
   fi
-else
-  fail "nixos/frost-gate.nix not found; rule 3 cannot run (was the module moved?)"
 fi
 
 if [ "$status" -eq 0 ]; then
-  echo "RNG hygiene: OK (no /dev/urandom, no bash \$RANDOM outside marked jitter, bootstrap passphrase length-checked)"
+  echo "RNG hygiene: OK (no /dev/urandom, no bash \$RANDOM outside marked jitter, bootstrap passphrase drawn from /dev/random and length-checked)"
 fi
 exit "$status"

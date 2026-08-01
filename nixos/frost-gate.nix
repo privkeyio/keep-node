@@ -304,6 +304,12 @@ let
         echo "frost-gate: WARNING could not wipe $dev during rollback; a signature persists. The next boot re-provisions it (no completion marker)." >&2
       }
       trap cleanup ERR
+      # A stop-timeout SIGTERM (or INT) does not fire the ERR trap, so roll back
+      # explicitly too: without this, a timeout mid-provision leaves a labelled,
+      # TPM2-enrolled device with no filesystem, which the next boot has to
+      # recognise as unprovisioned rather than as healthy. The oprf path already
+      # traps TERM/INT for the same reason.
+      trap 'cleanup; exit 1' TERM INT
       # /dev/random, not /dev/urandom. On Linux >= 5.6 /dev/random blocks only
       # until the CRNG is initialised and never afterwards, which is exactly the
       # guarantee wanted here: this runs on the first boot of a freshly imaged
@@ -942,6 +948,19 @@ in
         RemainAfterExit = true;
       }
       // hardening
+      // lib.optionalAttrs (cfg.mode == "tpm") {
+        # Bound first-boot provisioning explicitly. The default this would
+        # otherwise inherit is 90s, and the VM tests run with 300s
+        # (nixpkgs test-instrumentation), so CI cannot observe the real budget.
+        # The window has to cover: the /dev/random read (instant once the CRNG
+        # is up, which on x86_64 with RDRAND is within the first milliseconds,
+        # but unbounded on a board booted with random.trust_cpu=0 and no other
+        # early entropy), luksFormat --iter-time 1000, systemd-cryptenroll's
+        # argon2id benchmark, and mkfs.ext4. Failing this unit leaves the vault
+        # down and needs a manual restart, so the budget is generous rather than
+        # tight: a slow first boot is a much better outcome than a false timeout.
+        TimeoutStartSec = 600;
+      }
       // lib.optionalAttrs (cfg.mode == "oprf") {
         # systemd TPM-decrypts these into $CREDENTIALS_DIRECTORY (ramfs) at unit start. If a PCR
         # changed, decryption fails, the unit fails, and the volume stays locked (fail-closed).
