@@ -53,6 +53,11 @@ status=0
 fail() { printf '\n\033[31mFAIL\033[0m %s\n' "$1"; status=1; }
 
 OPT_OUT='rng-hygiene: ok'
+# This script is a .sh file and its rules name the very tokens they ban, so it
+# would report itself. Excluded by path rather than by opt-out markers, which
+# would blunt the markers' signal. Caught only after committing: run untracked,
+# `git ls-files` did not list it and it passed locally while failing in CI.
+SELF='scripts/check-rng-hygiene.sh'
 
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
   printf '\n\033[31mFAIL\033[0m not inside a git work tree; this guard scans tracked files only\n'
@@ -61,7 +66,8 @@ git rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
 
 list_sources() {
   git ls-files '*.nix' '*.sh' '*.py' 'justfile' \
-    | grep -vE '^tests/'
+    | grep -vE '^tests/' \
+    | grep -vxF "$SELF"
 }
 
 SOURCES=$(list_sources)
