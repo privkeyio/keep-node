@@ -48,6 +48,18 @@ jobs:
           fi
           echo "checks=$checks" >> "$GITHUB_OUTPUT"
 
+  # Pure shell, seconds, no Nix evaluation: an entropy-source defect is reported
+  # immediately and stays reportable even when the flake or the VM matrix is broken
+  # for unrelated reasons. See scripts/check-rng-hygiene.sh for the rules and the
+  # COLDCARD firmware disclosure that motivated them.
+  rng-hygiene:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check for silent RNG fallbacks
+        run: ./scripts/check-rng-hygiene.sh
+
   # Build the expensive shared packages once and PUSH them to the `privkey` Cachix binary cache, so
   # the per-check jobs substitute keep-web/keep-cli instead of cold-rebuilding them. keep-cli
   # (tpm-attestation + bindgen) is a ~10min Rust build that oprf-unlock depends on; keep-web is what
