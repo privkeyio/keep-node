@@ -57,6 +57,12 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
+        with:
+          # This job checks out a PR branch and then EXECUTES a script from it.
+          # actions/checkout persists GITHUB_TOKEN into .git/config by default,
+          # leaving it readable by PR-authored code. Nothing here needs git
+          # credentials.
+          persist-credentials: false
       - name: Check for silent RNG fallbacks
         run: ./scripts/check-rng-hygiene.sh
 
