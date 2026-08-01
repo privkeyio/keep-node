@@ -245,6 +245,7 @@ let
             # Do not rely on the ~24s discovery time for this: a fast failure (holder online but declining)
             # can cycle much quicker. (2) A power blip reboots a whole fleet at once, so the +RANDOM jitter
             # spreads retries instead of hammering one relay/holder set in lockstep.
+            # rng-hygiene: ok - retry jitter to de-synchronise a fleet reboot, not key material
             sleep $(( 10 + RANDOM % 5 ))
           done
           cryptsetup open --key-file "$keyf" --keyfile-size 32 "$dev" "$mapper"
@@ -303,7 +304,20 @@ let
         echo "frost-gate: WARNING could not wipe $dev during rollback; a signature persists. The next boot re-provisions it (no completion marker)." >&2
       }
       trap cleanup ERR
-      pass="$(head -c 32 /dev/urandom | base64)"
+      # /dev/random, not /dev/urandom. On Linux >= 5.6 /dev/random blocks only
+      # until the CRNG is initialised and never afterwards, which is exactly the
+      # guarantee wanted here: this runs on the first boot of a freshly imaged
+      # appliance, before any seed file exists, and its output becomes the LUKS
+      # passphrase for the vault data volume. /dev/urandom never blocks and will
+      # return output from an uninitialised CRNG if read early enough -- quietly,
+      # with only a kernel log line. The blocking read costs nothing once the
+      # CRNG is up, which by this point in boot it almost always is; "almost
+      # always" is not the standard this key should be held to.
+      pass="$(head -c 32 /dev/random | base64)"
+      # base64 of exactly 32 bytes is 44 characters. `set -o pipefail` already
+      # catches a failing read, but a short one would not raise: it would
+      # luksFormat the volume under a truncated passphrase and carry on.
+      [ "''${#pass}" -eq 44 ] || { echo "frost-gate: FATAL short entropy read; refusing to format $dev" >&2; exit 1; }
       echo -n "$pass" | cryptsetup luksFormat -q --label "$label" --iter-time 1000 "$dev" -
       ${lib.optionalString (cfg.recoveryKeyFile != null) ''
         # Opt-in recovery keyslot (keepNode.frostGate.recoveryKeyFile). Enroll a high-entropy
