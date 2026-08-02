@@ -197,6 +197,15 @@ in
           assertion = config.services.vaultwarden.enable;
           message = "keepNode.vaultReplication.rsaKeyFile is set but services.vaultwarden.enable is false: the shared-key installer has nothing to seed a key for.";
         }
+        {
+          # The option description already says "not a Nix-path literal"; nothing
+          # enforced it. `rsaKeyFile = "${./secrets/rsa_key.pem}"` type-checks and
+          # copies the cluster-wide JWT signing key into /nix/store at 0444, and CI
+          # pushes store paths to a public Cachix cache. Mirrors the assertions
+          # keepWeb and mesh already carry for the same wording.
+          assertion = !(lib.hasPrefix builtins.storeDir (toString cfg.rsaKeyFile));
+          message = "keepNode.vaultReplication.rsaKeyFile must be a runtime path (e.g. /run/secrets/...), not a Nix store path: the cluster's JWT signing key would be world-readable in /nix/store.";
+        }
       ];
 
       systemd.services.keep-node-vault-rsa-key = {

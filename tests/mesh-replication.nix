@@ -12,6 +12,9 @@
   vaultRsaKeyFixture,
   ...
 }:
+let
+  rsaDir = "/run/keep-node-vault-rsa";
+in
 {
   name = "keep-node-mesh-replication";
 
@@ -19,13 +22,18 @@
     { pkgs, ... }:
     {
       imports = [ ../nixos/keep-node.nix ];
+      # Staged into /run: the rsaKeyFile assertion rejects store paths, because a
+      # real deploy passing one would leave the cluster's JWT signing key
+      # world-readable in /nix/store. Same tmpfiles "C" copy the mesh tests use.
+      systemd.tmpfiles.rules = [
+        "C ${rsaDir}/rsa_key.pem 0600 root root - ${vaultRsaKeyFixture}/rsa_key.pem"
+      ];
       keepNode.mesh = {
         enable = true;
         package = nvpnPackage;
       };
       keepNode.vaultReplication = {
-        # Test-only anti-pattern (exactly what rsaKeyFile warns against): a Nix-store path leaves the key world-readable in /nix/store. Safe only because this is an ephemeral per-build fixture, never a real cluster signing key; a real deploy must pass an out-of-band path.
-        rsaKeyFile = "${vaultRsaKeyFixture}/rsa_key.pem";
+        rsaKeyFile = "${rsaDir}/rsa_key.pem";
         litestream.enable = true;
         role = "active";
         meshReplication.enable = true;
@@ -39,13 +47,18 @@
     { pkgs, ... }:
     {
       imports = [ ../nixos/keep-node.nix ];
+      # Staged into /run: the rsaKeyFile assertion rejects store paths, because a
+      # real deploy passing one would leave the cluster's JWT signing key
+      # world-readable in /nix/store. Same tmpfiles "C" copy the mesh tests use.
+      systemd.tmpfiles.rules = [
+        "C ${rsaDir}/rsa_key.pem 0600 root root - ${vaultRsaKeyFixture}/rsa_key.pem"
+      ];
       keepNode.mesh = {
         enable = true;
         package = nvpnPackage;
       };
       keepNode.vaultReplication = {
-        # Test-only anti-pattern (exactly what rsaKeyFile warns against): a Nix-store path leaves the key world-readable in /nix/store. Safe only because this is an ephemeral per-build fixture, never a real cluster signing key; a real deploy must pass an out-of-band path.
-        rsaKeyFile = "${vaultRsaKeyFixture}/rsa_key.pem";
+        rsaKeyFile = "${rsaDir}/rsa_key.pem";
         role = "standby";
         meshReplication.enable = true;
         # Low threshold so the lag test can prove the healthy->stale transition without a long wait.

@@ -22,6 +22,8 @@
 }:
 let
   vwClient = import ./lib/vw-client.nix { inherit pkgs; };
+  passEnvFile = "/run/keep-node-oprf/keep-pass-env";
+  passEnvFixture = pkgs.writeText "keep-pass-env" "KEEP_PASSWORD=fixturepass123";
 in
 {
   name = "keep-node-oprf-gate-2of3-test";
@@ -58,6 +60,13 @@ in
     }:
     {
       imports = [ ../nixos/keep-node.nix ];
+      # Staged into /run: the keepPasswordEnvFile assertion rejects store paths,
+      # because a real deploy passing one would leave KEEP_PASSWORD world-readable
+      # in /nix/store. The consuming provision unit is operator-run and not
+      # wantedBy boot, so it cannot race systemd-tmpfiles-setup.
+      systemd.tmpfiles.rules = [
+        "C ${passEnvFile} 0600 root root - ${passEnvFixture}"
+      ];
 
       keepNode.frostGate = {
         enable = true;
@@ -81,7 +90,7 @@ in
         bootUnlockTimeoutSec = 100;
         keepPasswordCred = "/var/lib/keep-node/keep-password.cred";
         oprfShareCred = "/var/lib/keep-node/oprf-share.cred";
-        keepPasswordEnvFile = "${pkgs.writeText "keep-pass-env" "KEEP_PASSWORD=fixturepass123"}";
+        keepPasswordEnvFile = passEnvFile;
         tpmTcti = "device:/dev/tpmrm0";
         allowInsecureWs = true;
       };

@@ -832,6 +832,15 @@ in
         message = "keepNode.frostGate.enable requires keepNode.frostGate.volumeDevice.";
       }
       {
+        # Loaded as a systemd EnvironmentFile holding KEEP_PASSWORD. Its
+        # description says to pass a runtime path; nothing enforced it, so a
+        # Nix-path literal would put the vault password in /nix/store at 0444.
+        assertion =
+          cfg.keepPasswordEnvFile == null
+          || !(lib.hasPrefix builtins.storeDir (toString cfg.keepPasswordEnvFile));
+        message = "keepNode.frostGate.keepPasswordEnvFile must be a runtime path (e.g. /run/secrets/...), not a Nix store path: KEEP_PASSWORD would be world-readable in /nix/store.";
+      }
+      {
         assertion = cfg.quorum.threshold <= cfg.quorum.total && cfg.quorum.threshold >= 1;
         message = "keepNode.frostGate.quorum: need 1 <= threshold <= total.";
       }

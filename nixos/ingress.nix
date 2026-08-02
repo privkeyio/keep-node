@@ -102,6 +102,18 @@ in
         assertion = config.keepNode.vaultwarden.enable;
         message = "keepNode.ingress requires keepNode.vaultwarden.enable (it proxies to Vaultwarden).";
       }
+      {
+        # Both descriptions say to pass a runtime path; nothing enforced it. A
+        # Nix-path literal copies the TLS private key into /nix/store at 0444.
+        assertion =
+          cfg.tlsKeyFile == null || !(lib.hasPrefix builtins.storeDir (toString cfg.tlsKeyFile));
+        message = "keepNode.ingress.tlsKeyFile must be a runtime path (e.g. /run/secrets/...), not a Nix store path: the TLS private key would be world-readable in /nix/store.";
+      }
+      {
+        assertion =
+          cfg.tlsCertFile == null || !(lib.hasPrefix builtins.storeDir (toString cfg.tlsCertFile));
+        message = "keepNode.ingress.tlsCertFile must be a runtime path (e.g. /run/secrets/...), not a Nix store path.";
+      }
     ];
 
     # Vaultwarden must know its public URL (links, WebAuthn, etc.) and must trust the proxy's

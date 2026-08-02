@@ -4,6 +4,7 @@
 { ... }:
 let
   hostName = "vault.test";
+  tlsDir = "/run/keep-node-ingress-tls";
 in
 {
   name = "keep-node-ingress";
@@ -22,11 +23,20 @@ in
       imports = [ ../nixos/keep-node.nix ];
 
       keepNode.vaultwarden.enable = true;
+      # Staged into /run rather than referenced in the store directly: the
+      # tlsKeyFile assertion rejects store paths, because a real deploy passing
+      # one would leave the TLS private key world-readable in /nix/store. Same
+      # tmpfiles "C" copy the mesh tests use for identityDir.
+      systemd.tmpfiles.rules = [
+        "C ${tlsDir}/cert.pem 0644 root root - ${cert}/cert.pem"
+        "C ${tlsDir}/key.pem 0600 root root - ${cert}/key.pem"
+      ];
+
       keepNode.ingress = {
         enable = true;
         hostName = hostName;
-        tlsCertFile = "${cert}/cert.pem";
-        tlsKeyFile = "${cert}/key.pem";
+        tlsCertFile = "${tlsDir}/cert.pem";
+        tlsKeyFile = "${tlsDir}/key.pem";
       };
 
       environment.systemPackages = [
