@@ -29,22 +29,49 @@ run_probe() {
     PROBE="$name"
     printf '%s' "$content" > "$name"
 
-    cp .git/index "$TMPDIR_T/index" 2>/dev/null || : > "$TMPDIR_T/index"
-    GIT_INDEX_FILE="$TMPDIR_T/index" git add "$name" 2>/dev/null
+    # Build the temp index from HEAD rather than copying .git/index. The copy
+    # depended on that file existing and being current, which is not guaranteed
+    # under every checkout, and an empty index made the guard abort with "no
+    # sources found" for every case: the reject cases then passed for entirely
+    # the wrong reason while the accept cases failed.
+    rm -f "$TMPDIR_T/index"
+    GIT_INDEX_FILE="$TMPDIR_T/index" git read-tree HEAD 2>/dev/null
+    GIT_INDEX_FILE="$TMPDIR_T/index" git add -f "$name" 2>/dev/null
 
-    local rc=0
-    GIT_INDEX_FILE="$TMPDIR_T/index" "$GUARD" >/dev/null 2>&1 || rc=$?
+    local staged
+    staged=$(GIT_INDEX_FILE="$TMPDIR_T/index" git ls-files | wc -l)
+    if [ "$staged" -lt 10 ]; then
+        echo "  HARNESS BROKEN: only $staged file(s) staged; the guard would scan almost nothing"
+        fails=$((fails + 1))
+        rm -f "$name"; PROBE=""
+        return
+    fi
+
+    local rc=0 out
+    out=$(GIT_INDEX_FILE="$TMPDIR_T/index" "$GUARD" 2>&1) || rc=$?
 
     rm -f "$name"; PROBE=""
 
-    if [ "$expect" = fail ] && [ "$rc" -eq 0 ]; then
-        echo "  BYPASS: $desc"
-        fails=$((fails + 1))
-    elif [ "$expect" = pass ] && [ "$rc" -ne 0 ]; then
-        echo "  FALSE POSITIVE: $desc"
-        fails=$((fails + 1))
+    if [ "$expect" = fail ]; then
+        if [ "$rc" -eq 0 ]; then
+            echo "  BYPASS: $desc"
+            fails=$((fails + 1))
+        elif ! printf '%s' "$out" | grep -qF "$name"; then
+            # The guard failed, but not because of this probe. Without this the
+            # test would credit an unrelated abort as a successful detection.
+            echo "  WRONG REASON: $desc (guard failed without naming $name)"
+            fails=$((fails + 1))
+        else
+            echo "  ok: $desc"
+        fi
     else
-        echo "  ok: $desc"
+        if [ "$rc" -ne 0 ]; then
+            echo "  FALSE POSITIVE: $desc"
+            printf '%s\n' "$out" | sed 's/^/      /' | head -4
+            fails=$((fails + 1))
+        else
+            echo "  ok: $desc"
+        fi
     fi
 }
 

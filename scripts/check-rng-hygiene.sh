@@ -57,7 +57,10 @@ OPT_OUT='rng-hygiene: ok'
 # would report itself. Excluded by path rather than by opt-out markers, which
 # would blunt the markers' signal. Caught only after committing: run untracked,
 # `git ls-files` did not list it and it passed locally while failing in CI.
-SELF='scripts/check-rng-hygiene.sh'
+# The self-test carries the same banned tokens as probe fixtures, so it hits
+# this identically. Both are excluded by path.
+SELF='scripts/check-rng-hygiene.sh
+scripts/test-rng-hygiene.sh'
 
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
   printf '\n\033[31mFAIL\033[0m not inside a git work tree; this guard scans tracked files only\n'
