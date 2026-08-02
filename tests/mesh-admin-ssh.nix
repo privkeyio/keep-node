@@ -97,8 +97,13 @@ in
 
       # The operator's private key on a 0600 path for the ssh client (the store copy is 0444).
       nodeA.succeed("install -m 0600 ${adminKeyFixture}/id /root/id")
+      # -n matters: machine.succeed() runs its command through a shell on the VM's
+      # backdoor serial channel, and ssh without -n reads that channel's stdin.
+      # It then swallows the driver's own protocol stream, so the remote command
+      # completes while the driver waits forever for a completion marker that was
+      # already consumed. Timing-dependent, so it can pass locally and hang in CI.
       ssh = (
-          "ssh -i /root/id -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+          "ssh -n -i /root/id -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
           "-o ConnectTimeout=10 -o BatchMode=yes"
       )
 
@@ -116,7 +121,7 @@ in
       # 2. The SAME SSH on nodeB's LAN/underlay address is REFUSED -- sshd is opened only on the mesh
       # interface, so the hostile LAN never reaches it. (ConnectTimeout bounds a dropped-packet hang.)
       nodeA.fail(
-          "ssh -i /root/id -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+          "ssh -n -i /root/id -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
           "-o ConnectTimeout=5 -o BatchMode=yes keepadmin@${ipBUnderlay} true"
       )
 
@@ -124,7 +129,7 @@ in
       # throwaway keypair that is NOT in keepadmin's authorized_keys and confirm the login fails.
       nodeA.succeed('ssh-keygen -t ed25519 -N "" -f /root/wrong -q')
       nodeA.fail(
-          f"ssh -i /root/wrong -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+          f"ssh -n -i /root/wrong -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
           f"-o ConnectTimeout=10 -o BatchMode=yes keepadmin@{meshB} true"
       )
 

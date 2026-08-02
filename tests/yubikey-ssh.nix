@@ -78,8 +78,13 @@ in
       mixed.wait_for_unit("sshd.service")
       narrow.wait_for_unit("sshd.service")
 
+      # -n matters: machine.succeed() runs its command through a shell on the VM's
+      # backdoor serial channel, and ssh without -n reads that channel's stdin.
+      # It then swallows the driver's own protocol stream, so the remote command
+      # completes while the driver waits forever for a completion marker that was
+      # already consumed. Timing-dependent, so it can pass locally and hang in CI.
       ssh = (
-          "ssh -i /root/id -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+          "ssh -n -i /root/id -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
           "-o BatchMode=yes -o ConnectTimeout=10"
       )
       for m in (strict, mixed, narrow):
