@@ -63,6 +63,13 @@ jobs:
           # leaving it readable by PR-authored code. Nothing here needs git
           # credentials.
           persist-credentials: false
+      # Run the guard's own self-test first. The guard has had seven separate
+      # bypasses; a scanner that quietly stops scanning reports a clean tree
+      # exactly like a clean tree does, so the rules are asserted before they
+      # are trusted.
+      - name: Self-test the RNG hygiene guard
+        run: ./scripts/test-rng-hygiene.sh
+
       - name: Check for silent RNG fallbacks
         run: ./scripts/check-rng-hygiene.sh
 

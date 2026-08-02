@@ -57,15 +57,33 @@ OPT_OUT='rng-hygiene: ok'
 # would report itself. Excluded by path rather than by opt-out markers, which
 # would blunt the markers' signal. Caught only after committing: run untracked,
 # `git ls-files` did not list it and it passed locally while failing in CI.
-SELF='scripts/check-rng-hygiene.sh'
+# The self-test carries the same banned tokens as probe fixtures, so it hits
+# this identically. Both are excluded by path.
+SELF='scripts/check-rng-hygiene.sh
+scripts/test-rng-hygiene.sh'
 
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
   printf '\n\033[31mFAIL\033[0m not inside a git work tree; this guard scans tracked files only\n'
   exit 1
 }
 
+# Extension list plus a shebang sweep. An extension gate alone is a bypass: the
+# same read in `scripts/x.bash`, or in an extensionless hook, was simply never
+# scanned. Anything tracked that declares itself a shell or python program gets
+# scanned whatever it is called.
 list_sources() {
-  git ls-files '*.nix' '*.sh' '*.py' 'justfile' \
+  {
+    git ls-files '*.nix' '*.sh' '*.bash' '*.py' 'justfile'
+    git ls-files | while IFS= read -r f; do
+      case "$f" in
+        *.nix|*.sh|*.bash|*.py|justfile) continue ;;
+      esac
+      [ -f "$f" ] || continue
+      case "$(head -c 80 "$f" 2>/dev/null | head -n 1)" in
+        '#!'*sh|'#!'*sh\ *|'#!'*python*|'#!'*bash*) printf '%s\n' "$f" ;;
+      esac
+    done
+  } | sort -u \
     | grep -vE '^tests/' \
     | grep -vxF "$SELF"
 }
@@ -160,10 +178,23 @@ scanner_died() {
   exit 1
 }
 
+# Splitting the token across a concatenation hid it from a line regex:
+# `src = "/dev/" + "urandom"` and `"/dev/" ++ "urandom"` both read the same file
+# at runtime. Collapse quote-adjacent concatenation before matching so the rules
+# see the string the program actually builds. Reported against the raw line, so
+# the output still shows what the author wrote.
+normalise() {
+  sed -E 's/"[ \t]*\+\+?[ \t]*"//g; s/"[ \t]*"//g; s/\x27[ \t]*\+\+?[ \t]*\x27//g'
+}
+
 scan() { # $1 = ERE
   printf '%s\n' "$CODE" | awk -v pat="$1" '{
+    raw = $0
     line = $0; sub(/^[^:]*:[0-9]+:/, "", line)
-    if (line ~ pat) print $0
+    norm = line
+    gsub(/"[ \t]*\+\+?[ \t]*"/, "", norm)
+    gsub(/"[ \t]*"/, "", norm)
+    if (line ~ pat || norm ~ pat) print raw
   }'
 }
 
@@ -181,6 +212,15 @@ report "$urandom_bad" "reads /dev/urandom, which never waits for the kernel CRNG
   'use /dev/random. On Linux >= 5.6 it blocks only until the CRNG is initialised' \
   'and never afterwards, which is the guarantee a first-boot appliance needs.' \
   "Mark a deliberate non-key-material read: # $OPT_OUT - <reason>"
+
+# ----------------------------------- 1b. no device path built at runtime ----
+# `d=urandom; head -c 32 /dev/$d` reads the banned device while matching no
+# literal. A dynamic /dev/ path is rare enough in this repo that requiring the
+# marker on it costs nothing, and it closes the indirection route into rule 1.
+dyndev_bad=$(scan '/dev/[$"\x27]|/dev/\$\{') || scanner_died
+report "$dyndev_bad" "builds a /dev path at runtime, so rule 1 cannot see which device is read:" \
+  'name the device literally, or mark it if the indirection is deliberate.' \
+  "Mark it: # $OPT_OUT - <reason>"
 
 # ------------------------------------------------- 2. no bash seeded PRNG ----
 bashrandom_bad=$(scan '(^|[^a-zA-Z0-9_])RANDOM([^a-zA-Z0-9_]|$)') || scanner_died
