@@ -203,7 +203,7 @@ in
           # copies the cluster-wide JWT signing key into /nix/store at 0444, and CI
           # pushes store paths to a public Cachix cache. Mirrors the assertions
           # keepWeb and mesh already carry for the same wording.
-          assertion = !(lib.hasPrefix builtins.storeDir (toString cfg.rsaKeyFile));
+          assertion = !(lib.hasPrefix "${builtins.storeDir}/" (toString cfg.rsaKeyFile));
           message = "keepNode.vaultReplication.rsaKeyFile must be a runtime path (e.g. /run/secrets/...), not a Nix store path: the cluster's JWT signing key would be world-readable in /nix/store.";
         }
       ];

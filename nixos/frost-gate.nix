@@ -837,7 +837,7 @@ in
         # Nix-path literal would put the vault password in /nix/store at 0444.
         assertion =
           cfg.keepPasswordEnvFile == null
-          || !(lib.hasPrefix builtins.storeDir (toString cfg.keepPasswordEnvFile));
+          || !(lib.hasPrefix "${builtins.storeDir}/" (toString cfg.keepPasswordEnvFile));
         message = "keepNode.frostGate.keepPasswordEnvFile must be a runtime path (e.g. /run/secrets/...), not a Nix store path: KEEP_PASSWORD would be world-readable in /nix/store.";
       }
       {
