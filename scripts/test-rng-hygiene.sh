@@ -12,7 +12,7 @@
 # variable, so the working tree and the developer's staged changes are untouched.
 set -uo pipefail
 
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || { echo "FAIL: cannot cd to the repo root"; exit 1; }
 GUARD=scripts/check-rng-hygiene.sh
 [ -x "$GUARD" ] || { echo "FAIL: $GUARD not found or not executable"; exit 1; }
 
@@ -26,6 +26,16 @@ PROBE=""
 # run_probe <filename> <content> <expect: pass|fail> <description>
 run_probe() {
     local name="$1" content="$2" expect="$3" desc="$4"
+
+    # The probe must exist on disk, not just in the index: the guard's shebang
+    # sweep reads bytes with `head`. So this does write into the working tree,
+    # briefly, and removes the file on every path including the EXIT trap.
+    # Refuse rather than clobber if the name is already taken.
+    if [ -e "$name" ]; then
+        echo "  HARNESS BROKEN: $name already exists; refusing to overwrite a real file"
+        fails=$((fails + 1))
+        return
+    fi
     PROBE="$name"
     printf '%s' "$content" > "$name"
 
@@ -105,13 +115,14 @@ run_probe probe_pyshebang '#!/usr/bin/env python3
 open("/dev/urandom", "rb").read(32)
 ' fail "extensionless python file is scanned"
 
-run_probe probe_hash_string.sh 'printf "#x"
-pass=$(head -c 32 /dev/urandom)
-' fail "a # inside a string does not start a comment and hide the read"
+# One line on purpose. Split across two, the second line is caught whatever the
+# comment splitter does, so the probe would pass even against the naive
+# index($0, "#") this case exists to rule out.
+run_probe probe_hash_string.sh 'printf "#x"; pass=$(head -c 32 /dev/urandom)
+' fail "a # inside a string does not start a comment and hide a read on the same line"
 
-run_probe probe_marker_string.sh 'msg="#rng-hygiene: ok"
-pass="/dev/urandom"
-' fail "an opt-out marker inside a string literal does not exempt the line"
+run_probe probe_marker_string.sh 'msg="#rng-hygiene: ok"; pass="/dev/urandom"
+' fail "an opt-out marker inside a string literal does not exempt the same line"
 
 run_probe probe_random.sh 'k=$RANDOM
 ' fail "bash \$RANDOM"
