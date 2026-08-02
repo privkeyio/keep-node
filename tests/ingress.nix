@@ -27,9 +27,14 @@ in
       # tlsKeyFile assertion rejects store paths, because a real deploy passing
       # one would leave the TLS private key world-readable in /nix/store. Same
       # tmpfiles "C" copy the mesh tests use for identityDir.
+      # The key is owned by nginx, not root: the module points
+      # services.nginx.sslCertificateKey straight at this path, and nginx runs
+      # its config test unprivileged, so a root-only mode fails the pre-start
+      # with "cannot load certificate key ... Permission denied". A real deploy
+      # has the same requirement. The certificate is public, so it stays 0644.
       systemd.tmpfiles.rules = [
         "C ${tlsDir}/cert.pem 0644 root root - ${cert}/cert.pem"
-        "C ${tlsDir}/key.pem 0600 root root - ${cert}/key.pem"
+        "C ${tlsDir}/key.pem 0400 nginx nginx - ${cert}/key.pem"
       ];
 
       keepNode.ingress = {
