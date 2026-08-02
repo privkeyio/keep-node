@@ -129,18 +129,18 @@ in
       }
       {
         assertion =
-          cfg.passwordFile == null || !(lib.hasPrefix builtins.storeDir (toString cfg.passwordFile));
+          cfg.passwordFile == null || !(lib.hasPrefix "${builtins.storeDir}/" (toString cfg.passwordFile));
         message = "keepNode.keepWeb.passwordFile must be a runtime path (e.g. /run/secrets/...), not a Nix store path: the password would be world-readable in /nix/store.";
       }
       {
         assertion =
-          cfg.authTokenFile == null || !(lib.hasPrefix builtins.storeDir (toString cfg.authTokenFile));
+          cfg.authTokenFile == null || !(lib.hasPrefix "${builtins.storeDir}/" (toString cfg.authTokenFile));
         message = "keepNode.keepWeb.authTokenFile must be a runtime path (e.g. /run/secrets/...), not a Nix store path: the token would be world-readable in /nix/store.";
       }
       {
         assertion =
           cfg.stateIdentityFile == null
-          || !(lib.hasPrefix builtins.storeDir (toString cfg.stateIdentityFile));
+          || !(lib.hasPrefix "${builtins.storeDir}/" (toString cfg.stateIdentityFile));
         message = "keepNode.keepWeb.stateIdentityFile must be a runtime path, not a Nix store path: the shared cluster nsec would be world-readable in /nix/store.";
       }
       {
@@ -149,7 +149,8 @@ in
       }
       {
         assertion =
-          cfg.storageKeyFile == null || !(lib.hasPrefix builtins.storeDir (toString cfg.storageKeyFile));
+          cfg.storageKeyFile == null
+          || !(lib.hasPrefix "${builtins.storeDir}/" (toString cfg.storageKeyFile));
         message = "keepNode.keepWeb.storageKeyFile must be a runtime path, not a Nix store path: the shared cluster vault key would be world-readable in /nix/store.";
       }
     ];

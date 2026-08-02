@@ -227,7 +227,7 @@ in
         # off the world-readable /nix/store. A path literal (`./secrets/a`) coerces into the store, 0444
         # and pushed to any binary cache -- exactly the cleartext-key leak the FROST gate exists to stop.
         # Reject it at eval time instead of leaving it to the option's prose.
-        assertion = cfg.identityDir == null || !lib.hasPrefix builtins.storeDir cfg.identityDir;
+        assertion = cfg.identityDir == null || !lib.hasPrefix "${builtins.storeDir}/" cfg.identityDir;
         message = "keepNode.mesh.identityDir (${toString cfg.identityDir}) is inside the Nix store: that copies the mesh Nostr secret key into the world-readable /nix/store. Deliver it out-of-band to a path on the target host (e.g. /run/secrets/... via agenix/sops), never as a Nix path literal.";
       }
       {

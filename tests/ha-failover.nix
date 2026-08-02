@@ -22,20 +22,28 @@
   nvpnPackage,
   ...
 }:
+let
+  rsaDir = "/run/keep-node-vault-rsa";
+in
 {
   name = "keep-node-ha-failover";
 
   # nodeA and nodeB are identical; share one module across both.
   #
-  # Test-only: this deliberately does the anti-pattern the rsaKeyFile option warns against, feeding
-  # a Nix-store path so the key sits world-readable in /nix/store. Safe here because the fixture is
-  # an ephemeral per-build key, never a real secret. A real deploy must pass an out-of-band path.
   defaults =
     { pkgs, ... }:
     {
       imports = [ ../nixos/keep-node.nix ];
-      keepNode.vaultReplication.rsaKeyFile = "${vaultRsaKeyFixture}/rsa_key.pem";
-      keepNode.vaultReplication.rsaKeyPubFile = "${vaultRsaKeyFixture}/rsa_key.pub.pem";
+      # Staged into /run rather than referenced in the store directly: the
+      # rsaKeyFile assertion rejects store paths, because a real deploy passing
+      # one would leave the cluster's JWT signing key world-readable in
+      # /nix/store. Same tmpfiles "C" copy the mesh tests use for identityDir.
+      systemd.tmpfiles.rules = [
+        "C ${rsaDir}/rsa_key.pem 0600 root root - ${vaultRsaKeyFixture}/rsa_key.pem"
+        "C ${rsaDir}/rsa_key.pub.pem 0644 root root - ${vaultRsaKeyFixture}/rsa_key.pub.pem"
+      ];
+      keepNode.vaultReplication.rsaKeyFile = "${rsaDir}/rsa_key.pem";
+      keepNode.vaultReplication.rsaKeyPubFile = "${rsaDir}/rsa_key.pub.pem";
       # sqlite: write/read the WAL probe; litestream: restore the replica on the peer.
       environment.systemPackages = [
         pkgs.sqlite

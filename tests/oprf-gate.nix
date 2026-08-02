@@ -23,6 +23,8 @@ let
   # Headless Bitwarden client for the M0 vault round-trip (crypto validated by the vw-client-check
   # test): register an account, store a login, read it back -- no browser, no bw/rbw agent.
   vwClient = import ./lib/vw-client.nix { inherit pkgs; };
+  passEnvFile = "/run/keep-node-oprf/keep-pass-env";
+  passEnvFixture = pkgs.writeText "keep-pass-env" "KEEP_PASSWORD=fixturepass123";
 in
 {
   name = "keep-node-oprf-gate-test";
@@ -59,6 +61,13 @@ in
     }:
     {
       imports = [ ../nixos/keep-node.nix ];
+      # Staged into /run: the keepPasswordEnvFile assertion rejects store paths,
+      # because a real deploy passing one would leave KEEP_PASSWORD world-readable
+      # in /nix/store. The consuming provision unit is operator-run and not
+      # wantedBy boot, so it cannot race systemd-tmpfiles-setup.
+      systemd.tmpfiles.rules = [
+        "C ${passEnvFile} 0600 root root - ${passEnvFixture}"
+      ];
 
       keepNode.frostGate = {
         enable = true;
@@ -76,9 +85,7 @@ in
         };
         keepPasswordCred = "/var/lib/keep-node/keep-password.cred";
         oprfShareCred = "/var/lib/keep-node/oprf-share.cred";
-        # Test-only: the provision unit reads KEEP_PASSWORD from here. A real deploy uses a
-        # 0400 secret, not a store path. Matches the fixture DB's password.
-        keepPasswordEnvFile = "${pkgs.writeText "keep-pass-env" "KEEP_PASSWORD=fixturepass123"}";
+        keepPasswordEnvFile = passEnvFile;
         tpmTcti = "device:/dev/tpmrm0";
         # Test-only: forward KEEP_ALLOW_WS into the confined boot scope so it can reach the in-VM
         # ws:// relay. Never set in production, where the boot OPRF exchange must stay over wss://.
