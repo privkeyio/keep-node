@@ -8,7 +8,7 @@
     # main-HEAD, so the appliance builds from a curated, known-good version rather than whatever main
     # happens to be; bump the tag to adopt a newer release deliberately.
     keep = {
-      url = "github:privkeyio/keep/v0.7.5";
+      url = "github:privkeyio/keep/v0.12.3";
       flake = false;
     };
     # nostr-vpn (`nvpn`): the node-to-node encrypted mesh transport (boringtun userspace WireGuard,
@@ -29,7 +29,7 @@
     # the kernel/initrd/cmdline into TPM PCR 11. Consumed only by the opt-in keepNode.measuredBoot
     # module and the measured-boot test; pinned so the boot stack is reproducible.
     lanzaboote = {
-      url = "github:nix-community/lanzaboote/v1.1.0";
+      url = "github:nix-community/lanzaboote/v1.2.0";
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
@@ -38,7 +38,7 @@
     # privkey's own relay instead of nostr-rs-relay. Pinned to a tagged RELEASE (not main-HEAD), same
     # as keep; bump the tag to adopt a newer release.
     wisp = {
-      url = "github:privkeyio/wisp/v0.5.11";
+      url = "github:privkeyio/wisp/v0.9.1";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
