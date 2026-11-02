@@ -27,10 +27,10 @@ jobs:
     outputs:
       checks: ${{ steps.list.outputs.checks }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install Nix
         # Pinned to a full commit SHA (v22) so CI never runs a mutable upstream ref.
-        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25
+        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa
       - id: list
         # The 16 checks are heavy QEMU VM tests; running the whole matrix on every PR push saturates
         # the shared GitHub-hosted concurrency pool (starving other repos) and serializes into a long
@@ -56,7 +56,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           # This job checks out a PR branch and then EXECUTES a script from it.
           # actions/checkout persists GITHUB_TOKEN into .git/config by default,
@@ -88,13 +88,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25
+        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa
       - name: Cachix (push privkey)
         # Pinned to a full commit SHA (v15) so CI never runs a mutable upstream ref; this action
         # handles the write token, so an upstream re-tag must not silently change its code.
-        uses: cachix/cachix-action@ad2ddac53f961de1989924296a1f236fcfbaa4fc
+        uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866
         with:
           name: privkey
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
@@ -125,7 +125,7 @@ jobs:
       matrix:
         check: ${{ fromJSON(needs.discover.outputs.checks) }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       # The nixosTests boot QEMU VMs; KVM makes them fast (and avoids timeouts).
       - name: Enable KVM
@@ -159,14 +159,14 @@ jobs:
 
       - name: Install Nix
         # Pinned to a full commit SHA (v22) so CI never runs a mutable upstream ref.
-        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25
+        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa
 
       # Pull keep-web/keep-cli from the `privkey` Cachix cache the warm job pushed, so they are
       # substituted, not rebuilt. Public cache -> no auth needed; skipPush so these jobs never
       # upload their (large, non-reusable) VM-test outputs.
       - name: Cachix (pull privkey)
         # Pinned to a full commit SHA (v15) so CI never runs a mutable upstream ref.
-        uses: cachix/cachix-action@ad2ddac53f961de1989924296a1f236fcfbaa4fc
+        uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866
         with:
           name: privkey
           skipPush: true
